@@ -10,6 +10,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -156,21 +157,60 @@ class SinkTest
     @Test
     void loggingSinkSkipsSessionLevelMessagesWhenAskedTo()
     {
-        // Nothing to assert on the log output without capturing a logger; what matters is that the
-        // sink is total - it must never throw on any message, admin or application.
-        final LoggingSink adminIncluded = new LoggingSink("test ", true);
-        final LoggingSink adminExcluded = new LoggingSink("test ", false);
+        final List<String> withAdmin = new ArrayList<>();
+        final List<String> withoutAdmin = new ArrayList<>();
+        final LoggingSink adminIncluded = new LoggingSink("test ", true, withAdmin::add);
+        final LoggingSink adminExcluded = new LoggingSink("test ", false, withoutAdmin::add);
 
-        adminIncluded.onMessage(message("A", "8=FIX.4.2\00135=A\001", 1));
-        adminExcluded.onMessage(message("A", "8=FIX.4.2\00135=A\001", 1));
-        adminIncluded.onMessage(message("D", "8=FIX.4.2\00135=D\001", 2));
-        adminExcluded.onMessage(message("D", "8=FIX.4.2\00135=D\001", 2));
-        new LoggingSink().onMessage(message("D", "8=FIX.4.2\00135=D\001", 3));
+        for (final LoggingSink sink : List.of(adminIncluded, adminExcluded))
+        {
+            sink.onMessage(message("A", "8=FIX.4.2\00135=A\001", 1));
+            sink.onMessage(message("D", "8=FIX.4.2\00135=D\00111=ORD-1\001", 2));
+        }
+
+        assertAll(
+            () -> assertEquals(
+                List.of("test <- [admin A seq=1] 8=FIX.4.2|35=A|",
+                    "test <- [app D seq=2] 8=FIX.4.2|35=D|11=ORD-1|"),
+                withAdmin),
+            () -> assertEquals(List.of("test <- [app D seq=2] 8=FIX.4.2|35=D|11=ORD-1|"), withoutAdmin),
+            () -> assertTrue(adminIncluded.includesAdminMessages()),
+            () -> assertFalse(adminExcluded.includesAdminMessages()));
+    }
+
+    @Test
+    void theDefaultLoggingSinkLogsApplicationMessagesOnlyAndPrefixesNothing()
+    {
+        final LoggingSink defaults = new LoggingSink();
+        // Same arguments the no-arg constructor uses, but with the lines captured rather than logged.
+        final List<String> lines = new ArrayList<>();
+        final LoggingSink capturing =
+            new LoggingSink(defaults.prefix(), defaults.includesAdminMessages(), lines::add);
+
+        capturing.onMessage(message("A", "8=FIX.4.2\00135=A\001", 1));
+        capturing.onMessage(message("0", "8=FIX.4.2\00135=0\001", 2));
+        capturing.onMessage(message("D", "8=FIX.4.2\00135=D\00111=ORD-1\001", 3));
+
+        assertAll(
+            () -> assertFalse(defaults.includesAdminMessages(), "the default sink is application messages only"),
+            () -> assertEquals("", defaults.prefix()),
+            () -> assertEquals("LoggingSink{prefix='', includeAdmin=false}", defaults.toString()),
+            () -> assertEquals(List.of("<- [app D seq=3] 8=FIX.4.2|35=D|11=ORD-1|"), lines,
+                "the Logon and the Heartbeat were skipped"));
     }
 
     @Test
     void theNoOpSinkAcceptsAnythingAndDoesNothing()
     {
-        FixMessageSink.NO_OP.onMessage(message("D", "8=FIX.4.2\00135=D\001", 1));
+        final FixMessageView delivered = message("D", "8=FIX.4.2\00135=D\001", 1);
+
+        FixMessageSink.NO_OP.onMessage(delivered);
+
+        assertAll(
+            // "Does nothing" is the contract: the view it was handed comes back untouched, so the
+            // next sink in a CompositeSink sees the same message.
+            () -> assertEquals("D", delivered.msgTypeAsString()),
+            () -> assertEquals(1, delivered.sequenceNumber()),
+            () -> assertEquals("8=FIX.4.2\00135=D\001", delivered.toFixString()));
     }
 }

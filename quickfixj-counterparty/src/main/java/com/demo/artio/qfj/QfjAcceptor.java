@@ -22,7 +22,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A QuickFIX/J acceptor that behaves like a small venue: it binds a port, accepts one session, and
- * answers every order it receives with execution reports.
+ * answers every order it receives with execution reports - or, for an order missing a field the
+ * report needs, with a {@code BusinessMessageReject}; see {@link ExecutionReports}.
  *
  * <p>Used two ways: as the counterparty for an Artio <em>initiator</em> in the integration tests,
  * and as the {@code acceptor} mode of {@link QfjMain} for the demo.
@@ -110,6 +111,8 @@ public final class QfjAcceptor implements AutoCloseable
         }
         catch (final quickfix.FieldNotFound e)
         {
+            // Only a request with no MsgType in its header gets here; a missing body field is
+            // answered with a BusinessMessageReject by ExecutionReports.
             LOGGER.warn("Could not answer {}: {}", RawFix.printable(request.toString()), e.getMessage());
         }
     }

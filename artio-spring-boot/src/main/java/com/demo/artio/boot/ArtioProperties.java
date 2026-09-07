@@ -54,6 +54,11 @@ import java.nio.file.Path;
  *                                 publisher, so received messages appear on the console as
  *                                 printable FIX. A demo affordance: it builds a String per
  *                                 message. Turn it off and the path allocates nothing.
+ * @param reconnectEnabled          initiator only: re-initiate the session after a disconnect
+ *                                  (default true; an acceptor waits for the counterparty anyway).
+ * @param reconnectInitialBackoffMs initiator only: first wait before re-initiating, doubled on
+ *                                  every failure (default 1000).
+ * @param reconnectMaxBackoffMs     initiator only: the ceiling for that wait (default 30000).
  */
 @Validated
 @ConfigurationProperties(prefix = "artio")
@@ -76,7 +81,10 @@ public record ArtioProperties(
     @DefaultValue("10000") @Positive long replyTimeoutMs,
     @DefaultValue("5000") @Positive long shutdownTimeoutMs,
     @DefaultValue("true") boolean deleteDirectoriesOnClose,
-    @DefaultValue("true") boolean logMessages)
+    @DefaultValue("true") boolean logMessages,
+    @DefaultValue("true") boolean reconnectEnabled,
+    @DefaultValue("1000") @Positive long reconnectInitialBackoffMs,
+    @DefaultValue("30000") @Positive long reconnectMaxBackoffMs)
 {
     /**
      * Translates the bound properties into the engine's own configuration record, which validates
@@ -102,6 +110,9 @@ public record ArtioProperties(
             .replyTimeoutMs(replyTimeoutMs)
             .shutdownTimeoutMs(shutdownTimeoutMs)
             .deleteDirectoriesOnClose(deleteDirectoriesOnClose)
+            .reconnectEnabled(reconnectEnabled)
+            .reconnectInitialBackoffMs(reconnectInitialBackoffMs)
+            .reconnectMaxBackoffMs(reconnectMaxBackoffMs)
             .build();
     }
 

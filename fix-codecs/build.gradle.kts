@@ -72,18 +72,36 @@ fun registerCodecGeneration(
         "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
         "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED"
     )
-    systemProperty("fix.codecs.parent_package", parentPackage)
-    // Flyweight codecs decode lazily; the engine reads whole messages, so the simpler
-    // eager codecs are enough and generate ~25% fewer classes.
-    systemProperty("fix.codecs.flyweight", "false")
-    systemProperty("fix.codecs.wrap_empty_buffer", "false")
-    // Tag numbers in the generated javadoc make the codecs navigable from a raw FIX log.
-    systemProperty("fix.codecs.tags_in_javadoc", "true")
+    // Everything that changes what the generator emits. Gradle does not track a JavaExec's system
+    // properties, so each one is declared as an input as well as set: change a value and the
+    // codecs are regenerated rather than restored from a cache entry built with the old one.
+    val codecOptions = mapOf(
+        "fix.codecs.parent_package" to parentPackage,
+        // Flyweight codecs decode lazily; the engine reads whole messages, so the simpler
+        // eager codecs are enough and generate ~25% fewer classes.
+        "fix.codecs.flyweight" to "false",
+        "fix.codecs.wrap_empty_buffer" to "false",
+        // Tag numbers in the generated javadoc make the codecs navigable from a raw FIX log.
+        "fix.codecs.tags_in_javadoc" to "true"
+    )
+    codecOptions.forEach { (key, value) ->
+        systemProperty(key, value)
+        inputs.property(key, value)
+    }
 
     val dir = dictionaryDir
-    inputs.file(dir.map { File(it, dictionaryFile) }).withPropertyName("dictionary")
-    inputs.property("parentPackage", parentPackage)
-    inputs.files(codecGenerator).withPropertyName("generatorClasspath")
+    // NONE, not the default absolute sensitivity: the dictionary arrives from :fix-dictionary's
+    // build directory, whose path is different in every checkout and on every CI agent. Only its
+    // content decides what the generator writes, so a cache entry from one working copy is a hit
+    // in the next.
+    inputs.file(dir.map { File(it, dictionaryFile) })
+        .withPropertyName("dictionary")
+        .withPathSensitivity(PathSensitivity.NONE)
+    // Same reason for the generator's own jars: what matters is their content and their order on
+    // the classpath, not where Gradle's module cache put them.
+    inputs.files(codecGenerator)
+        .withPropertyName("generatorClasspath")
+        .withNormalizer(ClasspathNormalizer::class)
     outputs.dir(outputDir).withPropertyName("generatedSources")
     outputs.cacheIf { true }
 

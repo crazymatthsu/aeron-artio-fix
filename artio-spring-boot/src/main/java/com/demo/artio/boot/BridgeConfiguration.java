@@ -12,6 +12,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.ArrayList;
@@ -41,6 +42,14 @@ import java.util.List;
  * so leaving it on would give each object two close paths, one ordered and one not. Both
  * {@code close()} methods are idempotent, so nothing would break; it would simply become impossible
  * to tell from the code which path did the flush. One owner each: the lifecycle adapter.
+ *
+ * <p>The adapters themselves do implement {@code DisposableBean}, for the one path on which no
+ * stop phase runs: a refresh that fails after start-up (a {@code ContextRefreshedEvent} listener
+ * throwing) destroys the singletons and leaves an inactive context whose {@code close()} is a
+ * no-op. Their {@code destroy()} is {@code stop()}, idempotent and a no-op after a normal close,
+ * and {@link #artioRuntimeLifecycle} is declared dependent on {@link #bridgePublisherLifecycle} so
+ * that reverse-dependency destruction is still engine first, publisher second. Still one owner
+ * each.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({ArtioProperties.class, BridgeProperties.class})
@@ -124,12 +133,23 @@ public class BridgeConfiguration
     }
 
     /**
-     * @param runtime the runtime to start last and stop first.
+     * @param runtime            the runtime to start last and stop first.
+     * @param publisherLifecycle the publisher's adapter, or null when {@code bridge.enabled} is
+     *                           false. <strong>Not used by the adapter</strong>: the parameter is
+     *                           here so that Spring records {@code artioRuntimeLifecycle} as a
+     *                           dependent of {@code bridgePublisherLifecycle}, and therefore
+     *                           destroys it first. Bean destruction is the one path on which the
+     *                           phases do not order the shutdown - a refresh that fails after
+     *                           start-up, see {@link BridgePublisherLifecycle#destroy()} - and
+     *                           reverse-dependency order is the only order it has. Without this
+     *                           edge that path would rely on the order of the methods in this
+     *                           file.
      * @return the high-phase lifecycle adapter.
      */
     @Bean
     @ConditionalOnProperty(prefix = "artio", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public ArtioRuntimeLifecycle artioRuntimeLifecycle(final ArtioRuntime runtime)
+    public ArtioRuntimeLifecycle artioRuntimeLifecycle(
+        final ArtioRuntime runtime, @Nullable final BridgePublisherLifecycle publisherLifecycle)
     {
         return new ArtioRuntimeLifecycle(runtime);
     }

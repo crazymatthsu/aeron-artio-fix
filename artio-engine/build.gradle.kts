@@ -111,9 +111,13 @@ val integrationTestTask = tasks.register<Test>("integrationTest") {
     // Paths in test output are relative to the repository root, as everywhere else in this build.
     workingDir = rootProject.projectDir
 
-    // These tests open sockets and start threads; a cached "up to date" result would be a green
-    // build that ran nothing.
-    outputs.upToDateWhen { false }
+    // These tests open sockets and start real engines; a "green" result that ran nothing is worth
+    // less than no result. `Test` is a cacheable task type and this build has
+    // org.gradle.caching=true, so `upToDateWhen { false }` alone is not enough: it forces the task
+    // to execute, but execution then finds a cache entry and restores it as FROM-CACHE without
+    // running a single test. doNotTrackState opts the task out of both up-to-date checks and the
+    // build cache, so every invocation runs the suite.
+    doNotTrackState("starts real engines and binds ports")
 
     testLogging {
         showStandardStreams = false

@@ -31,8 +31,11 @@ import java.util.Properties;
  * @param uri                       AMPS connection URI. Must select the {@code fix} message type -
  *                                  {@code tcp://host:9007/amps/fix} - because that is what makes
  *                                  the server parse FIX tags and honour {@code /11}-style SOW keys.
- * @param clientName                the AMPS client name; a unique suffix is appended per
- *                                  connection.
+ * @param clientName                the AMPS client name. A unique suffix is appended per
+ *                                  connection, unless {@code guaranteedPublishing} is on, when
+ *                                  the name is used exactly as given so AMPS recognises the
+ *                                  returning publisher; see
+ *                                  {@link AmpsClientConnection#clientName(BridgeConfig)}.
  * @param routes                    the ordered routing rules, applied after {@code defaultTopic}.
  * @param defaultTopic              the topic every application message goes to regardless of type,
  *                                  or null for none. {@code fix.raw}: unkeyed, so nothing can be

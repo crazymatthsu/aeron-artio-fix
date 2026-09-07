@@ -105,6 +105,19 @@ class QuickFixDictionaryReaderTest {
     }
 
     @Test
+    void aLowercaseRequiredFlagIsReadAsRequiredAsQuickFixJDoes() {
+        final FixDictionary dictionary = Dictionaries.read(
+                Dictionaries.minimal("    <message name=\"News\" msgtype=\"B\" msgcat=\"app\">"
+                        + "<field name=\"Text\" required=\"y\"/><field name=\"Symbol\" required=\"n\"/></message>\n",
+                        "", ""));
+
+        final MessageDef news = dictionary.messageByMsgType("B").orElseThrow();
+        assertTrue(assertInstanceOf(FieldRef.class, news.entries().get(0)).required(),
+                "QuickFIX/J's DataDictionary reads required with equalsIgnoreCase");
+        assertFalse(assertInstanceOf(FieldRef.class, news.entries().get(1)).required());
+    }
+
+    @Test
     void aMissingMsgcatIsReadAsNullRatherThanRejected() {
         final FixDictionary dictionary = Dictionaries.read(
                 Dictionaries.minimal("    <message name=\"News\" msgtype=\"B\">"

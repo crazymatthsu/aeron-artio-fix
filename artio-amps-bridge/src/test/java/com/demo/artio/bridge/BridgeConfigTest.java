@@ -139,6 +139,49 @@ class BridgeConfigTest
     }
 
     @Test
+    void aLoneRequiredTagIsRejectedRatherThanKeepingTheDefaultsInSilence()
+    {
+        // With a probe from route[0].msgType this key would be invisible: the defaults would stand
+        // and the operator would believe a guard exists that does not.
+        final IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+            () -> BridgeConfig.fromProperties(props("bridge.route[0].requiredTag", "11")));
+
+        assertEquals("bridge.route[0] has only .requiredTag; a route needs .msgType and .topic", error.getMessage());
+    }
+
+    @Test
+    void aRouteKeyWhoseIndexIsNotANumberIsRejectedByName()
+    {
+        assertAll(
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> BridgeConfig.fromProperties(props("bridge.route[x].msgType", "D", "bridge.route[x].topic", "t")))
+                .getMessage().contains("bridge.route[x].msgType")),
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> BridgeConfig.fromProperties(props("bridge.route[-1].msgType", "D", "bridge.route[-1].topic", "t")))
+                .getMessage().contains("bridge.route[-1]")),
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> BridgeConfig.fromProperties(props("bridge.route[0]msgType", "D")))
+                .getMessage().contains("bridge.route[0]msgType")));
+    }
+
+    @Test
+    void anIntegerThatDoesNotFitAnIntIsRejectedByNameRatherThanTruncated()
+    {
+        // (int)4294967296L is 0 and (int)2147483648L is negative: a cast would hand validation a
+        // different, wrong number, and the error would name no key.
+        assertAll(
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> BridgeConfig.fromProperties(props("bridge.ringBufferCapacityBytes", "4294967296")))
+                .getMessage().contains("bridge.ringBufferCapacityBytes")),
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> BridgeConfig.fromProperties(props(
+                    "bridge.route[0].msgType", "D",
+                    "bridge.route[0].topic", "fix.orders",
+                    "bridge.route[0].requiredTag", "2147483648")))
+                .getMessage().contains("bridge.route[0].requiredTag")));
+    }
+
+    @Test
     void aRouteMissingItsTopicOrItsMsgTypeIsRejectedByName()
     {
         assertAll(

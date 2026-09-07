@@ -129,8 +129,10 @@ public record BridgeProperties(
         final BridgeConfig.Builder builder = BridgeConfig.builder()
             .uri(uri.trim())
             .clientName(clientName.trim())
-            .defaultTopic(defaultTopic)
-            .adminTopic(adminTopic)
+            // Trimmed as BridgeMain trims: " fix.raw " would otherwise name a topic with no
+            // SOW and no journal, and nothing would say so.
+            .defaultTopic(defaultTopic == null ? null : defaultTopic.trim())
+            .adminTopic(adminTopic == null ? null : adminTopic.trim())
             .publishAdminMessages(publishAdminMessages)
             .ringBufferCapacityBytes(ringBufferCapacityBytes)
             .overflowPolicy(overflowPolicy)

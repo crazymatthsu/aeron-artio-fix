@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConvertDictionaryCliTest {
@@ -46,15 +47,42 @@ class ConvertDictionaryCliTest {
         final Path out42 = dir.resolve("out/FIX42.xml");
         final Path out44 = dir.resolve("out/FIX44.xml");
 
-        ConvertDictionary.main(new String[] {
+        final int exitCode = ConvertDictionary.run(new String[] {
                 "--batch",
                 fix42.toString(), out42.toString(),
                 fix44.toString(), out44.toString()});
 
+        assertEquals(0, exitCode);
         assertTrue(Files.exists(out42));
         assertTrue(Files.exists(out44));
         assertEquals("FIX.4.2", new QuickFixDictionaryReader().read(out42).beginString());
         assertEquals("FIX.4.4", new QuickFixDictionaryReader().read(out44).beginString());
+    }
+
+    @Test
+    void anythingButInputOutputPairsIsAUsageErrorWithExitCode2() {
+        assertEquals(ConvertDictionary.EXIT_BAD_ARGUMENTS, ConvertDictionary.run(new String[0]));
+        assertEquals(ConvertDictionary.EXIT_BAD_ARGUMENTS, ConvertDictionary.run(new String[] {"only-in.xml"}));
+        assertEquals(ConvertDictionary.EXIT_BAD_ARGUMENTS, ConvertDictionary.run(new String[] {"--batch"}));
+        assertEquals(ConvertDictionary.EXIT_BAD_ARGUMENTS,
+                ConvertDictionary.run(new String[] {"--batch", "a.xml", "b.xml", "c.xml"}));
+    }
+
+    @Test
+    void aConversionThatFailsGivesExitCode1AndDoesNotWriteTheOutput(@TempDir final Path dir) throws IOException {
+        final Path missing = dir.resolve("missing.xml");
+        final Path output = dir.resolve("out.xml");
+
+        assertEquals(ConvertDictionary.EXIT_FAILED,
+                ConvertDictionary.run(new String[] {missing.toString(), output.toString()}));
+        assertFalse(Files.exists(output));
+
+        final Path malformed = dir.resolve("malformed.xml");
+        Files.writeString(malformed, "<fix major=\"4\" minor=\"2\">");
+        assertEquals(ConvertDictionary.EXIT_FAILED,
+                ConvertDictionary.run(new String[] {malformed.toString(), output.toString()}),
+                "an unreadable dictionary is a failure, not a usage error");
+        assertFalse(Files.exists(output));
     }
 
     private static Path copyBundled(final String resource, final Path target) throws IOException {

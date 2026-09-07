@@ -58,12 +58,19 @@ class SowKeyBehaviourIT {
             client.publishFlush(10_000);
         }
 
-        List<String> records = SowReader.query(amps.uri(), KEYED_TOPIC, null);
+        // Pinned to THIS publish by its ExecID, not to the topic having any
+        // records at all: the other methods here publish to the same topic in
+        // whatever order JUnit picks, so "size() >= 1" passed on their records
+        // and proved nothing about this one.
+        List<String> mine = SowReader.query(amps.uri(), KEYED_TOPIC, null).stream()
+                .map(SowReader::printable)
+                .filter(record -> record.contains("|17=ACCEPTED-1|"))
+                .toList();
 
-        assertTrue(records.size() >= 1,
-                "AMPS 5.3.5.135 stores a keyless publish instead of refusing it; if this "
-                        + "topic is empty, the server now rejects them and docs/05 section "
-                        + "8.1 needs revisiting");
+        assertEquals(1, mine.size(),
+                () -> "AMPS 5.3.5.135 stores a keyless publish instead of refusing it; if this "
+                        + "record is missing, the server now rejects them and docs/05 section "
+                        + "8.1 needs revisiting. Found: " + mine);
     }
 
     @Test

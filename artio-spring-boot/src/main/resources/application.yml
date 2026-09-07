@@ -59,6 +59,13 @@ artio:
   # How long close() waits for a graceful FIX logout before pulling the plug.
   shutdown-timeout-ms: 5000
   delete-directories-on-close: true
+  # Initiator only. After a disconnect the engine re-initiates the session, waiting
+  # reconnect-initial-backoff-ms before the first attempt and doubling up to
+  # reconnect-max-backoff-ms. An acceptor ignores all three: the counterparty
+  # reconnects to it.
+  reconnect-enabled: true
+  reconnect-initial-backoff-ms: 1000
+  reconnect-max-backoff-ms: 30000
   # Compose a LoggingSink ahead of the publisher, so received messages appear
   # on the console as printable FIX. A demo affordance: it builds one String
   # per message. Turn it off and the receive path allocates nothing.
@@ -131,4 +138,5 @@ bridge:
   # required-tag is the destination topic's SOW key, and checking it is a
   # CORRECTNESS requirement: AMPS accepts a SOW publish that lacks the topic's
   # key and silently stores every such message under one shared record.
-  # Quote "8" - unquoted it is the integer 8 and the binder will say so.
+  # Quoting "8" is optional: an unquoted 8 is read by YAML as a number and the
+  # binder converts it to the string "8" (PropertyBindingTest binds one unquoted).

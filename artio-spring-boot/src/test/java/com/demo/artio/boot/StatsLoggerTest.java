@@ -6,7 +6,9 @@ import com.demo.artio.bridge.InMemoryPublishPort;
 import com.demo.artio.engine.ArtioRuntime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -58,7 +60,21 @@ class StatsLoggerTest
     @Test
     void logStatsSwallowsWhateverTheCountersThrowRatherThanKillingTheScheduler()
     {
-        assertDoesNotThrow(newLogger(1_000)::logStats);
+        // A provider whose bean cannot be created: getIfAvailable() throws BeanCreationException,
+        // which is exactly the kind of failure that must not end the scheduled task.
+        final DefaultListableBeanFactory factory = new DefaultListableBeanFactory();
+        factory.registerBeanDefinition("artioRuntime",
+            BeanDefinitionBuilder.genericBeanDefinition(ArtioRuntime.class, () ->
+            {
+                throw new IllegalStateException("the engine bean cannot be created");
+            }).getBeanDefinition());
+        final ObjectProvider<ArtioRuntime> throwing = factory.getBeanProvider(ArtioRuntime.class);
+        assertThrows(RuntimeException.class, throwing::getIfAvailable, "the provider really throws");
+
+        final StatsLogger logger = new StatsLogger(
+            new AmpsFixPublisher(BridgeConfig.defaults(), new InMemoryPublishPort()), throwing, 1_000);
+
+        assertDoesNotThrow(logger::logStats);
     }
 
     private static StatsLogger newLogger(final long intervalMs)

@@ -55,7 +55,9 @@ import java.util.Map;
  * <p>Runs at {@link Ordered#LOWEST_PRECEDENCE} so that {@code ConfigDataEnvironmentPostProcessor}
  * has already loaded {@code application.yml} and any {@code spring.config.*} location; there is
  * nothing to translate before that. Registered in
- * {@code META-INF/spring/org.springframework.boot.env.EnvironmentPostProcessor.imports}.
+ * {@code META-INF/spring.factories} under the {@code org.springframework.boot.env.EnvironmentPostProcessor}
+ * key. Not {@code META-INF/spring/...EnvironmentPostProcessor.imports}: that file form is read for
+ * auto-configurations only, and a post-processor listed there is ignored without a warning.
  */
 public class BridgeMainPropertyAliases implements EnvironmentPostProcessor, Ordered
 {

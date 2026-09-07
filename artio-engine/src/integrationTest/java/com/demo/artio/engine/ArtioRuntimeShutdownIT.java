@@ -8,7 +8,12 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -182,6 +187,102 @@ class ArtioRuntimeShutdownIT
         assertAll(
             () -> assertFalse(runtime.directory().toFile().exists(), runtime.directory().toString()),
             () -> assertFalse(runtime.isRunning()));
+    }
+
+    @Test
+    void closeCalledFromInsideASinkCallbackIsRefusedAndTheRuntimeStillClosesCleanlyFromAnotherThread()
+        throws Exception
+    {
+        final Set<String> before = ItSupport.liveThreadNames();
+        final int port = ItSupport.freePort();
+        final RecordingSessionListener listener = new RecordingSessionListener();
+        final AtomicInteger closeAttempts = new AtomicInteger();
+        final ArtioRuntime[] holder = new ArtioRuntime[1];
+        // The tempting mistake: a sink that decides it has seen enough and closes the runtime from
+        // the callback, i.e. from the poll thread close() has to wait for.
+        final FixMessageSink closingSink = message ->
+        {
+            closeAttempts.incrementAndGet();
+            holder[0].close();
+        };
+
+        final ArtioRuntime runtime = new ArtioRuntime(acceptorConfig(port), closingSink, listener);
+        holder[0] = runtime;
+        runtime.start();
+        try (QfjInitiator qfj = new QfjInitiator(initiatorConfig(port)))
+        {
+            qfj.start();
+            assertTrue(qfj.awaitLogon(ItSupport.STARTUP_TIMEOUT), "QuickFIX/J did not log on");
+            await().atMost(ItSupport.MESSAGE_TIMEOUT).until(() -> closeAttempts.get() >= 1);
+            await().atMost(ItSupport.MESSAGE_TIMEOUT).until(() -> !listener.errors().isEmpty());
+
+            final Throwable refusal = listener.errors().get(0);
+            assertAll(
+                () -> assertTrue(refusal instanceof IllegalStateException, refusal.toString()),
+                () -> assertTrue(refusal.getMessage().contains("poll thread"), refusal.getMessage()),
+                () -> assertTrue(refusal.getMessage().contains(runtime.runtimeId()), refusal.getMessage()),
+                // Refused means refused: nothing was torn down, the session is still up.
+                () -> assertTrue(runtime.isRunning()),
+                () -> assertTrue(runtime.isSessionActive()),
+                () -> assertTrue(qfj.isLoggedOn()));
+        }
+
+        // From the test thread it is the normal, orderly shutdown.
+        runtime.close();
+
+        await().atMost(SHUTDOWN_TIMEOUT).until(() -> ItSupport.leakedThreadNames(before).isEmpty());
+        assertAll(
+            () -> assertFalse(runtime.isRunning()),
+            () -> assertFalse(runtime.directory().toFile().exists()));
+    }
+
+    @Test
+    void everySendRacingCloseCompletesEvenTheOnesOfferedAfterThePollThreadDrainedForTheLastTime()
+        throws Exception
+    {
+        final int port = ItSupport.freePort();
+        final ArtioRuntime runtime = ArtioRuntime.launch(acceptorConfig(port), new CountingSink(), null);
+
+        // Producers hammer send() from several threads while close() runs. No counterparty is
+        // connected, so every future is expected to fail - the point is that every one of them
+        // completes, including a command whose offer lands after the poll thread's final drain.
+        final int producerCount = 4;
+        final List<List<CompletableFuture<Long>>> futuresPerProducer = new ArrayList<>();
+        final AtomicBoolean stop = new AtomicBoolean();
+        final List<Thread> producers = new ArrayList<>();
+        for (int i = 0; i < producerCount; i++)
+        {
+            final List<CompletableFuture<Long>> futures = new ArrayList<>();
+            futuresPerProducer.add(futures);
+            final Thread producer = new Thread(() ->
+            {
+                while (!stop.get())
+                {
+                    futures.add(runtime.send(ItSupport.newOrderSingle(FixVersion.FIX42, "RACE", "MSFT", 1, 1, 0)));
+                }
+            }, "send-racer-" + i);
+            producer.start();
+            producers.add(producer);
+        }
+
+        Thread.sleep(200);
+        runtime.close();
+        stop.set(true);
+        for (final Thread producer : producers)
+        {
+            producer.join(SHUTDOWN_TIMEOUT.toMillis());
+            assertFalse(producer.isAlive(), producer.getName() + " is stuck");
+        }
+
+        final List<CompletableFuture<Long>> all = futuresPerProducer.stream().flatMap(List::stream).toList();
+        assertTrue(all.size() > 1_000, "expected a busy race, saw only " + all.size() + " sends");
+        await().atMost(SHUTDOWN_TIMEOUT).until(() -> all.stream().allMatch(CompletableFuture::isDone));
+        assertAll(
+            () -> assertTrue(all.stream().allMatch(CompletableFuture::isCompletedExceptionally),
+                "no session was ever connected, so nothing could have been sent"),
+            () -> assertEquals(Set.of(), ItSupport.liveThreadNames().stream()
+                .filter(name -> name.contains(runtime.runtimeId()))
+                .collect(java.util.stream.Collectors.toSet())));
     }
 
     private static FixEngineConfig acceptorConfig(final int port)

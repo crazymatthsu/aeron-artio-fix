@@ -23,6 +23,9 @@ artio:
   shutdown-timeout-ms: 3456
   delete-directories-on-close: false
   log-messages: false
+  reconnect-enabled: false
+  reconnect-initial-backoff-ms: 250
+  reconnect-max-backoff-ms: 2500
 
 bridge:
   enabled: false
@@ -43,7 +46,9 @@ bridge:
   # Kebab-case here, camelCase in bridge.properties: relaxed binding makes both the same key, which
   # is what lets one configuration serve BridgeMain and this application.
   route:
-    - msg-type: "8"
+    # Deliberately unquoted: YAML reads 8 as a number and the binder must still deliver the
+    # string "8" (the shipped application.yml says quoting is optional; this is the proof).
+    - msg-type: 8
       topic: fix.execs
       required-tag: 17
     - msg-type: D

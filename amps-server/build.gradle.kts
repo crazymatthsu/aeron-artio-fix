@@ -61,7 +61,8 @@ tasks.register<Exec>("ampsLogs") {
  */
 val checkConfigXml = tasks.register("checkConfigXml") {
     group = "verification"
-    description = "Verify every AMPS flow config is well-formed XML with no '--' inside a comment."
+    description = "Verify every AMPS flow config is well-formed XML with no '--' inside a comment " +
+        "and no mention of the startup-complete log line."
 
     val flowsDir = layout.projectDirectory.dir("config/flows")
     inputs.dir(flowsDir).withPropertyName("flows")
@@ -82,6 +83,7 @@ val checkConfigXml = tasks.register("checkConfigXml") {
 
         configs.forEach { config ->
             failures += doubleHyphensInComments(config)
+            failures += readinessMarkerMentions(config)
         }
 
         // Only parse what survived the scan, so the readable message wins.
@@ -113,6 +115,32 @@ val checkConfigXml = tasks.register("checkConfigXml") {
                 configs.joinToString(", ") { it.parentFile.name },
         )
     }
+}
+
+/**
+ * The text of the server's startup-complete log line, which no flow config may
+ * contain anywhere - comment, attribute or element.
+ *
+ * `scripts/amps.sh wait` and the test harness decide AMPS is ready when this
+ * line appears in the container log, and AMPS echoes the entire config file
+ * into that log before it starts listening. A config that so much as mentions
+ * the phrase in a comment is therefore "ready" about a second early, and the
+ * first client to trust it is dropped mid-logon. Both waiters also require the
+ * numeric message code in front of the phrase, but that is a second line of
+ * defence, not a licence: the phrase stays out of the config.
+ */
+val readinessMarkerText = "AMPS initialization completed"
+
+/** Every line of `config` that contains [readinessMarkerText], as "flow/file:line: text". */
+fun readinessMarkerMentions(config: File): List<String> {
+    val label = "${config.parentFile.name}/${config.name}"
+    return config.readLines().withIndex()
+        .filter { (_, text) -> text.contains(readinessMarkerText, ignoreCase = true) }
+        .map { (index, text) ->
+            "$label:${index + 1}: mentions the startup log line '$readinessMarkerText'; AMPS " +
+                "echoes the config into its log before it is listening, so amps.sh wait and " +
+                "the test harness would see the server as ready too early: ${text.trim()}"
+        }
 }
 
 /**

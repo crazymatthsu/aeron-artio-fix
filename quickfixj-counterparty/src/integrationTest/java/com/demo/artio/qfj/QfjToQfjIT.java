@@ -2,6 +2,7 @@ package com.demo.artio.qfj;
 
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import quickfix.Message;
 
 import java.time.Duration;
 import java.util.List;
@@ -146,6 +147,39 @@ class QfjToQfjIT
             assertAll(
                 () -> assertEquals(false, acceptor.isLoggedOn()),
                 () -> assertTrue(acceptor.logoutCount() >= 1));
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(QfjVersion.class)
+    void anOrderWithoutOrderQtyIsAnsweredWithABusinessMessageRejectNotIgnored(final QfjVersion version)
+        throws Exception
+    {
+        final int port = FreePort.next();
+
+        try (QfjAcceptor acceptor = new QfjAcceptor(acceptorConfig(version, port));
+            QfjInitiator initiator = new QfjInitiator(initiatorConfig(version, port)))
+        {
+            acceptor.start();
+            initiator.start();
+            assertTrue(initiator.awaitLogon(LOGON_TIMEOUT), "initiator did not log on");
+
+            final Message order = Orders.newOrderSingle(version, "ORD-NOQTY", "MSFT", Orders.SIDE_BUY, 100, 101.25);
+            order.removeField(Tags.ORDER_QTY);
+            assertTrue(initiator.send(order));
+
+            assertTrue(initiator.awaitReceived(Tags.MSG_TYPE_BUSINESS_REJECT, 1, MESSAGE_TIMEOUT),
+                () -> "initiator saw " + initiator.receivedMessages());
+            final CapturedMessage reject = initiator.receivedMessages(Tags.MSG_TYPE_BUSINESS_REJECT).get(0);
+            assertAll(
+                () -> assertEquals("D", reject.field(Tags.REF_MSG_TYPE)),
+                () -> assertEquals("ORD-NOQTY", reject.field(Tags.BUSINESS_REJECT_REF_ID)),
+                () -> assertEquals(String.valueOf(ExecutionReports.CONDITIONALLY_REQUIRED_FIELD_MISSING),
+                    reject.field(Tags.BUSINESS_REJECT_REASON)),
+                () -> assertEquals(List.of(), initiator.receivedMessages(Tags.MSG_TYPE_EXECUTION_REPORT),
+                    "no execution report for an order with no quantity"),
+                // The venue's reject is an application message; neither session layer rejected anything.
+                () -> assertEquals(List.of(), rejects(acceptor.receivedMessages())));
         }
     }
 

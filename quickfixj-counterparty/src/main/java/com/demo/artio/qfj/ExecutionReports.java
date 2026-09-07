@@ -20,6 +20,13 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>{@code OrderCancelRequest(F)} - one {@code Canceled} report.</li>
  * </ul>
  *
+ * <p>A request that lacks a field the report needs - a {@code NewOrderSingle} without
+ * {@code OrderQty(38)}, any of them without {@code ClOrdID}, {@code Symbol} or {@code Side}, a
+ * replace or cancel without {@code OrigClOrdID} - is answered the way a venue answers it: with a
+ * {@code BusinessMessageReject(35=j)}, {@code BusinessRejectReason(380)=5} (conditionally required
+ * field missing) and the tag number in {@code Text(58)}, rather than with a report that invents a
+ * value or with silence.
+ *
  * <p>Identifiers are deterministic ({@code EXEC-1}, {@code ORDER-1}, ...) and an order keeps the
  * {@code OrderID} it was given, so a replace or cancel reports against the same order. That makes
  * the AMPS {@code fix.order.state} topic - keyed on {@code OrderID(37)} - meaningful.
@@ -43,6 +50,9 @@ public final class ExecutionReports
 
     /** {@code ExecTransType(20)} = New. FIX 4.2 only. */
     public static final char EXEC_TRANS_TYPE_NEW = '0';
+
+    /** {@code BusinessRejectReason(380)} = Conditionally required field missing. */
+    public static final int CONDITIONALLY_REQUIRED_FIELD_MISSING = 5;
 
     private final QfjVersion version;
     private final String orderIdPrefix;
@@ -76,23 +86,58 @@ public final class ExecutionReports
      *
      * @param request a {@code NewOrderSingle}, {@code OrderCancelReplaceRequest} or
      *                {@code OrderCancelRequest}.
-     * @return the execution reports to send, in order; empty for any other message type.
-     * @throws FieldNotFound if the request is missing a field the report needs.
+     * @return the execution reports to send, in order; one {@code BusinessMessageReject} when the
+     *         request lacks a field the report needs; empty for any other message type.
+     * @throws FieldNotFound if the request has no {@code MsgType(35)} in its header.
      */
     public List<Message> repliesTo(final Message request) throws FieldNotFound
     {
         final String msgType = request.getHeader().getString(Tags.MSG_TYPE);
-        return switch (msgType)
+        try
         {
-            case Tags.MSG_TYPE_NEW_ORDER_SINGLE -> acknowledgeAndFill(request);
-            case Tags.MSG_TYPE_CANCEL_REPLACE -> List.of(replaced(request));
-            case Tags.MSG_TYPE_CANCEL -> List.of(canceled(request));
-            default -> List.of();
-        };
+            return switch (msgType)
+            {
+                case Tags.MSG_TYPE_NEW_ORDER_SINGLE -> acknowledgeAndFill(request);
+                case Tags.MSG_TYPE_CANCEL_REPLACE -> List.of(replaced(request));
+                case Tags.MSG_TYPE_CANCEL -> List.of(canceled(request));
+                default -> List.of();
+            };
+        }
+        catch (final FieldNotFound missing)
+        {
+            return List.of(businessReject(request, msgType, missing.field));
+        }
+    }
+
+    /**
+     * {@code BusinessMessageReject(35=j)} for a request the venue cannot act on. Both dictionaries
+     * declare the message with {@code RefMsgType(372)} and {@code BusinessRejectReason(380)} required;
+     * {@code RefSeqNum(45)} points back at the request when its header carries a sequence number
+     * (always, once QuickFIX/J has delivered it) and {@code BusinessRejectRefID(379)} carries the
+     * {@code ClOrdID} when the request has one.
+     */
+    private static Message businessReject(final Message request, final String msgType, final int missingTag)
+        throws FieldNotFound
+    {
+        final Message reject = new Message();
+        reject.getHeader().setString(Tags.MSG_TYPE, Tags.MSG_TYPE_BUSINESS_REJECT);
+        if (request.getHeader().isSetField(Tags.MSG_SEQ_NUM))
+        {
+            reject.setInt(Tags.REF_SEQ_NUM, request.getHeader().getInt(Tags.MSG_SEQ_NUM));
+        }
+        reject.setString(Tags.REF_MSG_TYPE, msgType);
+        if (request.isSetField(Tags.CL_ORD_ID))
+        {
+            reject.setString(Tags.BUSINESS_REJECT_REF_ID, request.getString(Tags.CL_ORD_ID));
+        }
+        reject.setInt(Tags.BUSINESS_REJECT_REASON, CONDITIONALLY_REQUIRED_FIELD_MISSING);
+        reject.setString(Tags.TEXT, "Conditionally required field missing: tag " + missingTag);
+        return reject;
     }
 
     private List<Message> acknowledgeAndFill(final Message request) throws FieldNotFound
     {
+        require(request, Tags.CL_ORD_ID, Tags.ORDER_QTY, Tags.SYMBOL, Tags.SIDE);
         final String clOrdId = request.getString(Tags.CL_ORD_ID);
         final String orderId = orderIdFor(clOrdId, null);
         final double qty = request.getDouble(Tags.ORDER_QTY);
@@ -125,6 +170,7 @@ public final class ExecutionReports
 
     private Message replaced(final Message request) throws FieldNotFound
     {
+        require(request, Tags.CL_ORD_ID, Tags.ORIG_CL_ORD_ID, Tags.SYMBOL, Tags.SIDE);
         final String clOrdId = request.getString(Tags.CL_ORD_ID);
         final String origClOrdId = request.getString(Tags.ORIG_CL_ORD_ID);
         final String orderId = orderIdFor(clOrdId, origClOrdId);
@@ -145,6 +191,7 @@ public final class ExecutionReports
 
     private Message canceled(final Message request) throws FieldNotFound
     {
+        require(request, Tags.CL_ORD_ID, Tags.ORIG_CL_ORD_ID, Tags.SYMBOL, Tags.SIDE);
         final String clOrdId = request.getString(Tags.CL_ORD_ID);
         final String origClOrdId = request.getString(Tags.ORIG_CL_ORD_ID);
         final String orderId = orderIdFor(clOrdId, origClOrdId);
@@ -156,6 +203,21 @@ public final class ExecutionReports
         report.setDouble(Tags.CUM_QTY, 0);
         report.setDouble(Tags.AVG_PX, 0);
         return report;
+    }
+
+    /**
+     * Fails on the first missing tag before any identifier is handed out, so a rejected request
+     * leaves no {@code OrderID}, no {@code ExecID} and no {@code ClOrdID} mapping behind.
+     */
+    private static void require(final Message request, final int... tags) throws FieldNotFound
+    {
+        for (final int tag : tags)
+        {
+            if (!request.isSetField(tag))
+            {
+                throw new FieldNotFound(tag);
+            }
+        }
     }
 
     private Message base(

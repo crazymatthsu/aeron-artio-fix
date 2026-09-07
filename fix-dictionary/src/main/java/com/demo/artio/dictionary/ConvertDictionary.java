@@ -24,13 +24,33 @@ public final class ConvertDictionary {
     private ConvertDictionary() {
     }
 
+    /** Exit code when the command line is not a list of input/output pairs. */
+    public static final int EXIT_BAD_ARGUMENTS = 2;
+
+    /** Exit code when a dictionary could not be read, converted, checked or written. */
+    public static final int EXIT_FAILED = 1;
+
     public static void main(final String[] args) {
+        final int exitCode = run(args);
+        if (exitCode != 0) {
+            System.exit(exitCode);
+        }
+    }
+
+    /**
+     * Runs the command line and returns the exit code instead of exiting, so the whole path can be
+     * exercised in-process.
+     *
+     * @return 0 when every pair converted, {@link #EXIT_BAD_ARGUMENTS} (with the usage on stderr)
+     *         when the arguments are not input/output pairs, {@link #EXIT_FAILED} when a conversion
+     *         failed; the pairs before the failing one have already been written
+     */
+    public static int run(final String[] args) {
         final List<String> paths = arguments(args);
         if (paths.isEmpty() || paths.size() % 2 != 0) {
             System.err.println("Usage: ConvertDictionary <in.xml> <out.xml>");
             System.err.println("       ConvertDictionary --batch <in.xml> <out.xml> [<in.xml> <out.xml> ...]");
-            System.exit(2);
-            return;
+            return EXIT_BAD_ARGUMENTS;
         }
         try {
             for (int i = 0; i < paths.size(); i += 2) {
@@ -39,8 +59,9 @@ public final class ConvertDictionary {
         } catch (final IOException | RuntimeException e) {
             LOG.error("dictionary conversion failed", e);
             System.err.println("Conversion failed: " + e.getMessage());
-            System.exit(1);
+            return EXIT_FAILED;
         }
+        return 0;
     }
 
     private static List<String> arguments(final String[] args) {

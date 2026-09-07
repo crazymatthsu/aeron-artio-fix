@@ -42,9 +42,23 @@ dependencies {
     testImplementation(libs.awaitility)
     testRuntimeOnly(libs.junit.platform.launcher)
     testRuntimeOnly(libs.slf4j.simple)
+}
 
-    // This module has a main; consumers pick their own binding.
-    runtimeOnly(libs.slf4j.simple)
+/**
+ * The SLF4J binding for this module's two mains, and for nothing else.
+ *
+ * Not `runtimeOnly`: on a `java-library` that is part of the published runtime classpath, so every
+ * consumer inherits it - :artio-spring-boot would get slf4j-simple next to Spring Boot's logback,
+ * SLF4J would pick one of the two arbitrarily, and half of logback-spring.xml would silently do
+ * nothing. A consumer picks its own binding. Only `run` and `sowDump` are given this one, below.
+ */
+val mainLogging: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
+dependencies {
+    "mainLogging"(libs.slf4j.simple)
 }
 
 /**
@@ -104,6 +118,7 @@ application {
 
 tasks.named<JavaExec>("run") {
     workingDir = rootProject.projectDir
+    classpath(mainLogging)
     // Ctrl-C has to reach the JVM so the shutdown hook can flush AMPS.
     standardInput = System.`in`
     // Point the bridge somewhere else without editing bridge.properties, exactly as amps-demo's
@@ -122,18 +137,27 @@ tasks.named<JavaExec>("run") {
  *
  * Prints what a SOW topic holds, as printable FIX. `--replay fix.raw` counts and prints the
  * journal from the epoch instead. Needs a running AMPS; `amps-server/scripts/amps.sh start`.
+ * `-Dbridge.amps.uri=...` on the Gradle command line reaches it, as it does `run`.
  */
 tasks.register<JavaExec>("sowDump") {
     group = "application"
     description = "Print an AMPS SOW topic (or replay a journalled one) as printable FIX."
     mainClass.set("com.demo.artio.bridge.SowDump")
-    classpath = sourceSets.main.get().runtimeClasspath
+    classpath = sourceSets.main.get().runtimeClasspath + mainLogging
     workingDir = rootProject.projectDir
     systemProperties(
         mapOf(
             "org.slf4j.simpleLogger.defaultLogLevel" to "warn",
             "org.slf4j.simpleLogger.showThreadName" to "false"
         )
+    )
+    // SowDump reads bridge.amps.uri for its default URI; forwarded from the Gradle JVM exactly as
+    // `run` forwards it, so `-Dbridge.amps.uri=tcp://host:9007/amps/fix` works on both.
+    systemProperties(
+        System.getProperties()
+            .stringPropertyNames()
+            .filter { it.startsWith("bridge.") }
+            .associateWith { System.getProperty(it) }
     )
 }
 
@@ -155,25 +179,21 @@ val integrationTestTask = tasks.register<Test>("integrationTest") {
     // and one that asserts nothing cannot fail usefully.
     filter { excludeTestsMatching("*Benchmark") }
 
-    // Each variable is a declared INPUT, not merely forwarded: this repository sets
-    // org.gradle.caching=true, and an environment variable that is only forwarded is invisible to
-    // the cache key - so a run WITHOUT an AMPS image would cache an all-skipped result and the
-    // next run WITH one would restore it instead of executing. The reasoning is spelled out at
-    // length in amps-test-harness/build.gradle.kts.
+    // The harness reads these; forwarded from the Gradle JVM's environment.
     listOf("AMPS_IMAGE", "AMPS_PLATFORM", "CONTAINER_ENGINE", "AMPS_IT").forEach { name ->
         val value = providers.environmentVariable(name)
-        inputs.property(name, value.orElse(""))
         if (value.isPresent) {
             environment(name, value.get())
         }
     }
 
-    // ...and excluded from the cache and from up-to-date checks anyway. Correct inputs make the key
-    // as good as Gradle can see; they cannot make it complete, because whether this suite does
-    // anything depends on podman being installed and running and on free host ports. Ask for it and
-    // it runs.
-    outputs.upToDateWhen { false }
-    outputs.cacheIf { false }
+    // Never up to date, never cached, never restored. `Test` is a cacheable task type and this
+    // repository sets org.gradle.caching=true, so `upToDateWhen { false }` on its own is not
+    // enough: it forces the task to execute, and execution then finds a cache entry for the same
+    // inputs and restores it as FROM-CACHE without running a test - a green build that ran nothing.
+    // Whether this suite does anything depends on podman being installed and running, on the image
+    // being present and on free host ports, none of which Gradle can see. Ask for it and it runs.
+    doNotTrackState("starts real engines and containers")
 
     testLogging {
         showStandardStreams = true
@@ -195,13 +215,12 @@ tasks.register<Test>("publishBenchmark") {
     workingDir = rootProject.projectDir
     filter { includeTestsMatching("*Benchmark") }
     systemProperty("bridge.benchmark", "true")
-    outputs.upToDateWhen { false }
-    outputs.cacheIf { false }
+    // A measurement is only worth taking if it is taken; see integrationTest.
+    doNotTrackState("starts real engines and containers")
     testLogging { showStandardStreams = true }
 
     listOf("AMPS_IMAGE", "AMPS_PLATFORM", "CONTAINER_ENGINE", "AMPS_IT").forEach { name ->
         val value = providers.environmentVariable(name)
-        inputs.property(name, value.orElse(""))
         if (value.isPresent) {
             environment(name, value.get())
         }

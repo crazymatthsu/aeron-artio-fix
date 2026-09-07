@@ -121,6 +121,28 @@ class FixEngineConfigTest
     }
 
     @Test
+    void aNameContainingAPathSeparatorIsRejectedBecauseItBecomesADirectoryName()
+    {
+        // ArtioRuntime builds "artio-<name>-<mode>-<pid>-<counter>" under baseDirectory; a name
+        // with a separator in it would silently write outside that directory, and "../.." would
+        // escape it entirely.
+        assertAll(
+            () -> assertEquals(
+                "name is used as a directory name and must not contain '/' or '\\'; was 'a/b'",
+                assertThrows(IllegalArgumentException.class,
+                    () -> FixEngineConfig.acceptor().port(1).name("a/b").build()).getMessage()),
+            () -> assertEquals(
+                "name is used as a directory name and must not contain '/' or '\\'; was 'a\\b'",
+                assertThrows(IllegalArgumentException.class,
+                    () -> FixEngineConfig.acceptor().port(1).name("a\\b").build()).getMessage()),
+            () -> assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> FixEngineConfig.acceptor().port(1).name("../escape").build())
+                .getMessage().contains("must not contain")),
+            // A name that is only unusual, not dangerous, is still allowed.
+            () -> assertEquals("acc.1_2", FixEngineConfig.acceptor().port(1).name("acc.1_2").build().name()));
+    }
+
+    @Test
     void aCompIdContainingSohOrEqualsIsRejectedBecauseItWouldCorruptTheHeader()
     {
         assertAll(

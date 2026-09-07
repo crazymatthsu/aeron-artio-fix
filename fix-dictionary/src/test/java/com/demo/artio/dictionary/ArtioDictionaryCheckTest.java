@@ -6,6 +6,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import uk.co.real_logic.artio.dictionary.ir.Dictionary;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -168,6 +170,62 @@ class ArtioDictionaryCheckTest {
         assertRejectedThenAccepted(broken, "same field defined more than once on a message");
     }
 
+    @Test
+    void artioRejectsAFieldReachedThroughAGroupAndDirectlyButAcceptsTheConversion() {
+        final String broken = Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <group name="NoLegs" required="N"><field name="Symbol" required="N"/></group>
+                      <field name="Symbol" required="N"/>
+                    </message>
+                """, "    <field number=\"555\" name=\"NoLegs\" type=\"NUMINGROUP\"/>\n", "");
+
+        assertRejectedThenAccepted(broken, "same field defined more than once on a message");
+    }
+
+    @Test
+    void artioRejectsAFieldReachedThroughTwoComponentsButAcceptsTheConversion() {
+        final String broken = Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <component name="Instrument" required="N"/>
+                      <component name="UnderlyingInstrument" required="N"/>
+                    </message>
+                """, "", """
+                    <component name="Instrument"><field name="Symbol" required="N"/></component>
+                    <component name="UnderlyingInstrument"><field name="Symbol" required="N"/></component>
+                """);
+
+        assertRejectedThenAccepted(broken, "same field defined more than once on a message");
+    }
+
+    @Test
+    void artioRejectsAFieldReachedDirectlyAndThroughANestedComponentButAcceptsTheConversion() {
+        final String broken = Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <field name="Symbol" required="N"/>
+                      <component name="InstrumentBlock" required="N"/>
+                    </message>
+                """, "", """
+                    <component name="InstrumentBlock"><component name="Instrument" required="N"/></component>
+                    <component name="Instrument"><field name="Symbol" required="N"/></component>
+                """);
+
+        assertRejectedThenAccepted(broken, "same field defined more than once on a message");
+    }
+
+    @Test
+    void artioRejectsADataFieldWhoseLengthPartnerSitsInAComponentButAcceptsTheConversion() {
+        // The partner is reachable through the component, so a second copy beside the DATA field
+        // would be the duplicate Artio also refuses; the converter has to retype instead.
+        final String broken = Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <component name="Lengths" required="N"/>
+                      <field name="RawData" required="N"/>
+                    </message>
+                """, "", "    <component name=\"Lengths\"><field name=\"RawDataLength\" required=\"N\"/></component>\n");
+
+        assertRejectedThenAccepted(broken, "must have a corresponding LENGTH field");
+    }
+
     /**
      * The rules have to compose: a venue dictionary usually breaks several things at once.
      * This takes QuickFIX/J's FIX 4.2 and breaks eight of them, then checks the converter
@@ -233,18 +291,49 @@ class ArtioDictionaryCheckTest {
     }
 
     @Test
+    void aLowercaseRequiredFlagIsNormalisedSoArtioSeesTheFieldAsRequired() {
+        final String lowercase = Dictionaries.minimal(
+                "    <message name=\"News\" msgtype=\"B\" msgcat=\"app\"><field name=\"Text\" required=\"y\"/></message>\n",
+                "", "");
+
+        // Artio's DictionaryParser.isRequired is "Y".equals(...): it accepts the file and silently
+        // reads the entry as optional, so the codec would not enforce the field.
+        assertFalse(textIsRequired(ArtioDictionaryCheck.check(lowercase, "lowercase")));
+
+        final String converted = writer.toXml(Dictionaries.convertIdempotently(lowercase).dictionary());
+        assertTrue(converted.contains("<field name=\"Text\" required=\"Y\"/>"), converted);
+        assertTrue(textIsRequired(ArtioDictionaryCheck.check(converted, "converted")));
+    }
+
+    private static boolean textIsRequired(final Dictionary parsed) {
+        return parsed.messages().stream()
+                .filter(m -> m.fullType().equals("B")).findFirst().orElseThrow()
+                .entries().stream()
+                .filter(e -> e.name().equals("Text")).findFirst().orElseThrow()
+                .required();
+    }
+
+    @Test
     void aRejectionCarriesArtiosOwnReason() {
+        final String broken = Dictionaries.minimalWithField(
+                "    <field number=\"9005\" name=\"Weird\" type=\"NUMBER\"/>\n");
+
         final ArtioDictionaryCheck.DictionaryRejectedException e = assertThrows(
                 ArtioDictionaryCheck.DictionaryRejectedException.class,
-                () -> ArtioDictionaryCheck.check("<fix major=\"4\" minor=\"2\"><fields/>", "broken.xml"));
+                () -> ArtioDictionaryCheck.check(broken, "broken.xml"));
 
-        assertTrue(e.getMessage().startsWith("Artio's DictionaryParser rejected broken.xml:"), e.getMessage());
+        assertEquals(
+                "Artio's DictionaryParser rejected broken.xml: IllegalArgumentException: "
+                        + "No enum constant uk.co.real_logic.artio.dictionary.ir.Field.Type.NUMBER",
+                e.getMessage());
+        assertInstanceOf(IllegalArgumentException.class, e.getCause(), "Artio's own exception is the cause");
     }
 
     /**
      * Asserts Artio refuses {@code broken} for the stated reason, then accepts what the converter
-     * makes of it. {@code expectedReason} is matched against the whole exception chain so both the
-     * message and the stack frame that raised it can be used.
+     * makes of it, and that converting the output again changes nothing (byte for byte).
+     * {@code expectedReason} is matched against the whole exception chain so both the message and
+     * the stack frame that raised it can be used.
      */
     private void assertRejectedThenAccepted(final String broken, final String expectedReason) {
         final ArtioDictionaryCheck.DictionaryRejectedException rejection = assertThrows(
@@ -255,7 +344,7 @@ class ArtioDictionaryCheckTest {
                 () -> "expected Artio to complain about '" + expectedReason + "' but it said:\n"
                         + describe(rejection));
 
-        final String converted = writer.toXml(converter.convert(Dictionaries.read(broken)).dictionary());
+        final String converted = writer.toXml(Dictionaries.convertIdempotently(broken).dictionary());
         ArtioDictionaryCheck.check(converted, "converted");
     }
 

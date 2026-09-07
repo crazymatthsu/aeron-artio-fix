@@ -183,6 +183,41 @@ class FixMessageViewTest
     }
 
     @Test
+    void unwrappingAlsoClearsTheMetadataSoAStaleViewCannotBeMistakenForARealMessage()
+    {
+        wrap(NEW_ORDER_SINGLE, "D", 16);
+        view.unwrap();
+
+        assertAll(
+            // Clearing only the buffer would leave a retained view answering msgType(),
+            // sequenceNumber(), sessionKey() and isValid() with the last message's values - a
+            // sink that kept the reference would report a message that is no longer there.
+            () -> assertEquals(0, view.msgType()),
+            () -> assertEquals(0, view.sequenceNumber()),
+            () -> assertEquals(0, view.sequenceIndex()),
+            () -> assertEquals(0, view.timestampNs()),
+            () -> assertEquals(0, view.libraryId()),
+            () -> assertFalse(view.isValid(), "an empty view is not a valid message"),
+            () -> assertNull(view.sessionKey()),
+            () -> assertFalse(view.isAdmin()));
+    }
+
+    @Test
+    void aViewCanBeRewrappedAfterUnwrappingAndReadsTheNewMessageOnly()
+    {
+        wrap(NEW_ORDER_SINGLE, "D", 0);
+        view.unwrap();
+        wrap(NEW_ORDER_SINGLE, "A", 8);
+
+        assertAll(
+            () -> assertEquals("A", view.msgTypeAsString()),
+            () -> assertTrue(view.isAdmin()),
+            () -> assertEquals(7, view.sequenceNumber()),
+            () -> assertSame(SESSION, view.sessionKey()),
+            () -> assertEquals(NEW_ORDER_SINGLE, view.toFixString()));
+    }
+
+    @Test
     void toStringNamesTheSessionSequenceNumberMessageTypeAndWhetherItIsAdmin()
     {
         wrap(NEW_ORDER_SINGLE, "D", 0);

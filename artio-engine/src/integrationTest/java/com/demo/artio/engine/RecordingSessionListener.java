@@ -12,6 +12,8 @@ final class RecordingSessionListener implements SessionListener
     private final CopyOnWriteArrayList<String> events = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<SessionKey> acquired = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<Throwable> errors = new CopyOnWriteArrayList<>();
+    /** One entry per {@code onReconnectAttempt}, holding the back-off that preceded it. */
+    private final CopyOnWriteArrayList<Long> reconnectBackoffs = new CopyOnWriteArrayList<>();
 
     @Override
     public void onSessionAcquired(final SessionKey session)
@@ -45,6 +47,13 @@ final class RecordingSessionListener implements SessionListener
     }
 
     @Override
+    public void onReconnectAttempt(final int attempt, final long backoffMs)
+    {
+        reconnectBackoffs.add(backoffMs);
+        events.add("reconnect:" + attempt + ':' + backoffMs);
+    }
+
+    @Override
     public void onError(final Throwable error)
     {
         errors.add(error);
@@ -64,6 +73,18 @@ final class RecordingSessionListener implements SessionListener
     List<Throwable> errors()
     {
         return List.copyOf(errors);
+    }
+
+    /** @return how many reconnect attempts the runtime announced. */
+    int reconnectAttempts()
+    {
+        return reconnectBackoffs.size();
+    }
+
+    /** @return the back-off reported with each reconnect attempt, in order. */
+    List<Long> reconnectBackoffs()
+    {
+        return List.copyOf(reconnectBackoffs);
     }
 
     boolean sawEventStartingWith(final String prefix)

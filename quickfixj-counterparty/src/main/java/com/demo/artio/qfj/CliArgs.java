@@ -57,7 +57,9 @@ public record CliArgs(
      * @param args the raw arguments.
      * @return the parsed value.
      * @throws IllegalArgumentException on an unknown option, a missing value, a bad number or a
-     *                                  missing {@code --port}. The message names the problem.
+     *                                  missing {@code --port}. The message names the problem. Range
+     *                                  checks - the port, the heartbeat, equal comp ids - are
+     *                                  {@link QfjConfig}'s and surface from {@link #toConfig()}.
      */
     public static CliArgs parse(final String[] args)
     {
@@ -75,7 +77,7 @@ public record CliArgs(
         };
 
         String host = "localhost";
-        int port = -1;
+        Integer port = null;
         QfjVersion version = QfjVersion.FIX42;
         String sender = "QFJ";
         String target = "ARTIO";
@@ -111,8 +113,9 @@ public record CliArgs(
             }
         }
 
-        if (port < 0)
+        if (port == null)
         {
+            // Absent, as opposed to present and out of range: that is QfjConfig's complaint.
             throw new IllegalArgumentException("--port is required");
         }
         return new CliArgs(role, host, port, version, sender, target, runScenario, heartbeat, screenLog);
@@ -138,7 +141,10 @@ public record CliArgs(
         return false;
     }
 
-    /** @return the QuickFIX/J configuration these arguments describe. */
+    /**
+     * @return the QuickFIX/J configuration these arguments describe.
+     * @throws IllegalArgumentException if a value is out of range; see {@link QfjConfig}.
+     */
     public QfjConfig toConfig()
     {
         return QfjConfig.builder(role)

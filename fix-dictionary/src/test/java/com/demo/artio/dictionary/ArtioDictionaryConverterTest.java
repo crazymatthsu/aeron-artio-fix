@@ -151,7 +151,7 @@ class ArtioDictionaryConverterTest {
                 "", "").replace("<message name=\"Logon\" msgtype=\"A\" msgcat=\"admin\">",
                 "<message name=\"Logon\" msgtype=\"A\">");
 
-        final ConversionResult result = converter.convert(Dictionaries.read(xml));
+        final ConversionResult result = Dictionaries.convertIdempotently(xml);
 
         assertEquals("app", result.dictionary().messageByMsgType("B").orElseThrow().msgCat());
         assertEquals("admin", result.dictionary().messageByMsgType("A").orElseThrow().msgCat());
@@ -160,8 +160,8 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void anUnknownFieldTypeBecomesStringWithANote() {
-        final ConversionResult result = converter.convert(Dictionaries.read(
-                Dictionaries.minimalWithField("    <field number=\"9001\" name=\"Weird\" type=\"NUMBER\"/>\n")));
+        final ConversionResult result = Dictionaries.convertIdempotently(
+                Dictionaries.minimalWithField("    <field number=\"9001\" name=\"Weird\" type=\"NUMBER\"/>\n"));
 
         assertEquals("STRING", result.dictionary().fieldsByName().get("Weird").type());
         final List<ConversionNote> notes = notesFor(result, ArtioDictionaryConverter.RULE_UNKNOWN_FIELD_TYPE);
@@ -172,12 +172,12 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void theFourLegacyTypeSpellingsAreRewrittenToArtioConstants() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
                     <field number="9002" name="MaturityDate" type="UTCDATE"/>
                     <field number="9003" name="Coupon" type="RATE"/>
                     <field number="9004" name="Contract" type="MONTH-YEAR"/>
                     <field number="9005" name="Typo" type="STIRNG"/>
-                """)));
+                """));
 
         final var fields = result.dictionary().fieldsByName();
         assertEquals("UTCDATEONLY", fields.get("MaturityDate").type());
@@ -189,12 +189,12 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aValueWithoutADescriptionGetsOneDerivedFromItsRepresentation() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
                     <field number="9006" name="Flavour" type="CHAR">
                       <value enum="1"/>
                       <value enum="2" description=""/>
                     </field>
-                """)));
+                """));
 
         assertEquals(
                 List.of("VALUE_1", "VALUE_2"),
@@ -205,12 +205,12 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void twoDescriptionsThatNormaliseToTheSameJavaNameAreMadeUnique() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
                     <field number="9007" name="Flavour" type="CHAR">
                       <value enum="1" description="A-B"/>
                       <value enum="2" description="A_B"/>
                     </field>
-                """)));
+                """));
 
         assertEquals(
                 List.of("A_B", "A_B_2"),
@@ -221,13 +221,31 @@ class ArtioDictionaryConverterTest {
     }
 
     @Test
+    void deduplicationNeverStealsANameAnotherValueAlreadyHas() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
+                    <field number="9013" name="Flavour" type="CHAR">
+                      <value enum="1" description="ONE"/>
+                      <value enum="2" description="ONE"/>
+                      <value enum="3" description="ONE_2"/>
+                    </field>
+                """));
+
+        assertEquals(
+                List.of("ONE", "ONE_3", "ONE_2"),
+                result.dictionary().fieldsByName().get("Flavour").values().stream()
+                        .map(EnumValue::description).toList(),
+                "the third value was unique in the source and must keep its name");
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_ENUM_DESCRIPTION_DEDUP).size());
+    }
+
+    @Test
     void aDescriptionThatIsAJavaKeywordGetsAnUnderscoreSuffix() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
                     <field number="9008" name="Flavour" type="CHAR">
                       <value enum="1" description="new"/>
                       <value enum="2" description="class"/>
                     </field>
-                """)));
+                """));
 
         assertEquals(
                 List.of("new_", "class_"),
@@ -238,12 +256,12 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aRepeatedEnumRepresentationIsDropped() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField("""
                     <field number="9009" name="Flavour" type="CHAR">
                       <value enum="1" description="ONE"/>
                       <value enum="1" description="UNO"/>
                     </field>
-                """)));
+                """));
 
         assertEquals(
                 List.of("ONE"),
@@ -254,8 +272,8 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aFieldNameDeclaredTwiceKeepsTheFirstDeclaration() {
-        final ConversionResult result = converter.convert(Dictionaries.read(
-                Dictionaries.minimalWithField("    <field number=\"9010\" name=\"Symbol\" type=\"STRING\"/>\n")));
+        final ConversionResult result = Dictionaries.convertIdempotently(
+                Dictionaries.minimalWithField("    <field number=\"9010\" name=\"Symbol\" type=\"STRING\"/>\n"));
 
         assertEquals(55, result.dictionary().fieldsByName().get("Symbol").number());
         assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_DECLARATION).size());
@@ -263,14 +281,14 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void referencesToUndeclaredFieldsComponentsAndGroupCountersAreDropped() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimal("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
                     <message name="News" msgtype="B" msgcat="app">
                       <field name="Ghost" required="N"/>
                       <component name="GhostBlock" required="N"/>
                       <group name="NoGhosts" required="N"><field name="Text" required="N"/></group>
                       <field name="Text" required="N"/>
                     </message>
-                """, "", "")));
+                """, "", ""));
 
         final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
         assertEquals(List.of("Text"), news.entries().stream().map(DictionaryEntry::name).toList());
@@ -279,17 +297,143 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aFieldReachedBothDirectlyAndThroughAComponentIsDroppedFromTheMessage() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimal("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
                     <message name="News" msgtype="B" msgcat="app">
                       <field name="Symbol" required="N"/>
                       <component name="Instrument" required="N"/>
                     </message>
                 """, "", "    <component name=\"Instrument\">"
-                + "<field name=\"Symbol\" required=\"N\"/></component>\n")));
+                + "<field name=\"Symbol\" required=\"N\"/></component>\n"));
 
         final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
         assertEquals(List.of("Instrument"), news.entries().stream().map(DictionaryEntry::name).toList());
         assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
+    }
+
+    @Test
+    void aFieldReachedThroughAGroupAndThenDirectlyLosesTheLaterDirectCopy() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <group name="NoLegs" required="N"><field name="Symbol" required="N"/></group>
+                      <field name="Symbol" required="N"/>
+                    </message>
+                """, "    <field number=\"555\" name=\"NoLegs\" type=\"NUMINGROUP\"/>\n", ""));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("NoLegs"), news.entries().stream().map(DictionaryEntry::name).toList(),
+                "Artio reports the later occurrence, and a group is not shared, so the later copy goes");
+        final GroupRef group = (GroupRef) news.entries().get(0);
+        assertEquals(List.of("Symbol"), group.children().stream().map(DictionaryEntry::name).toList());
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
+    }
+
+    @Test
+    void aFieldReachedDirectlyAndThenThroughAGroupLosesTheGroupCopy() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <field name="Symbol" required="N"/>
+                      <group name="NoLegs" required="N">
+                        <field name="Symbol" required="N"/>
+                        <field name="Text" required="N"/>
+                      </group>
+                    </message>
+                """, "    <field number=\"555\" name=\"NoLegs\" type=\"NUMINGROUP\"/>\n", ""));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("Symbol", "NoLegs"), news.entries().stream().map(DictionaryEntry::name).toList());
+        final GroupRef group = (GroupRef) news.entries().get(1);
+        assertEquals(List.of("Text"), group.children().stream().map(DictionaryEntry::name).toList());
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
+    }
+
+    @Test
+    void aFieldReachedThroughTwoComponentsIsDroppedFromTheSecondComponentsDefinition() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <component name="Instrument" required="N"/>
+                      <component name="UnderlyingInstrument" required="N"/>
+                    </message>
+                """, "", """
+                    <component name="Instrument"><field name="Symbol" required="N"/></component>
+                    <component name="UnderlyingInstrument">
+                      <field name="Symbol" required="N"/>
+                      <field name="Text" required="N"/>
+                    </component>
+                """));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("Instrument", "UnderlyingInstrument"),
+                news.entries().stream().map(DictionaryEntry::name).toList(),
+                "the message keeps both components");
+        final var components = result.dictionary().componentsByName();
+        assertEquals(List.of("Symbol"),
+                components.get("Instrument").entries().stream().map(DictionaryEntry::name).toList());
+        assertEquals(List.of("Text"),
+                components.get("UnderlyingInstrument").entries().stream().map(DictionaryEntry::name).toList(),
+                "the later component definition loses the field");
+        final List<ConversionNote> notes = notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE);
+        assertEquals(1, notes.size());
+        assertEquals("component UnderlyingInstrument", notes.get(0).element());
+        assertTrue(notes.get(0).before().contains("News"), "the note names the message that caused it: " + notes.get(0));
+    }
+
+    @Test
+    void aFieldReachedDirectlyAndThroughANestedComponentIsDroppedFromTheMessage() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <field name="Symbol" required="N"/>
+                      <component name="InstrumentBlock" required="N"/>
+                    </message>
+                """, "", """
+                    <component name="InstrumentBlock"><component name="Instrument" required="N"/></component>
+                    <component name="Instrument"><field name="Symbol" required="N"/></component>
+                """));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("InstrumentBlock"), news.entries().stream().map(DictionaryEntry::name).toList());
+        final var components = result.dictionary().componentsByName();
+        assertEquals(List.of("Symbol"),
+                components.get("Instrument").entries().stream().map(DictionaryEntry::name).toList(),
+                "a component is shared, so it keeps its copy");
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
+    }
+
+    @Test
+    void aComponentReachedTwiceIsDroppedTheSecondTimeAsAWhole() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <component name="Instrument" required="N"/>
+                      <component name="InstrumentBlock" required="N"/>
+                    </message>
+                """, "", """
+                    <component name="InstrumentBlock"><component name="Instrument" required="N"/></component>
+                    <component name="Instrument"><field name="Symbol" required="N"/></component>
+                """));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("Instrument", "InstrumentBlock"),
+                news.entries().stream().map(DictionaryEntry::name).toList());
+        assertEquals(List.of(),
+                result.dictionary().componentsByName().get("InstrumentBlock").entries(),
+                "the nested reference is what Artio reaches second");
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
+    }
+
+    @Test
+    void aDataFieldWhoseLengthPartnerIsAlreadyReachedThroughAComponentIsRetypedNotDuplicated() {
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
+                    <message name="News" msgtype="B" msgcat="app">
+                      <component name="Lengths" required="N"/>
+                      <field name="RawData" required="N"/>
+                    </message>
+                """, "", "    <component name=\"Lengths\"><field name=\"RawDataLength\" required=\"N\"/></component>\n"));
+
+        final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
+        assertEquals(List.of("Lengths", "RawData"), news.entries().stream().map(DictionaryEntry::name).toList(),
+                "no second RawDataLength may be inserted beside the DATA field");
+        assertEquals("STRING", result.dictionary().fieldsByName().get("RawData").type());
+        assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DATA_FIELD_LENGTH).size());
+        assertEquals(0, notesFor(result, ArtioDictionaryConverter.RULE_DUPLICATE_FIELD_IN_MESSAGE).size());
     }
 
     @Test
@@ -299,7 +443,7 @@ class ArtioDictionaryConverterTest {
                 .replace("    <field name=\"LastMsgSeqNumProcessed\" required=\"N\"/>\n", "")
                 .replace("    <field number=\"369\" name=\"LastMsgSeqNumProcessed\" type=\"SEQNUM\"/>\n", "");
 
-        final ConversionResult result = converter.convert(Dictionaries.read(xml));
+        final ConversionResult result = Dictionaries.convertIdempotently(xml);
 
         final Set<String> header = result.dictionary().header().stream()
                 .map(DictionaryEntry::name).collect(Collectors.toSet());
@@ -318,7 +462,7 @@ class ArtioDictionaryConverterTest {
                 .replace("      <field name=\"SessionRejectReason\" required=\"N\"/>\n", "")
                 .replace("      <field name=\"ResetSeqNumFlag\" required=\"N\"/>\n", "");
 
-        final ConversionResult result = converter.convert(Dictionaries.read(xml));
+        final ConversionResult result = Dictionaries.convertIdempotently(xml);
 
         assertTrue(fieldNames(result, "3").contains("SessionRejectReason"));
         assertTrue(fieldNames(result, "A").contains("ResetSeqNumFlag"));
@@ -335,7 +479,7 @@ class ArtioDictionaryConverterTest {
                         """, "")
                 .replace("      <value enum=\"1\" description=\"TEST_REQUEST\"/>\n", "");
 
-        final ConversionResult result = converter.convert(Dictionaries.read(xml));
+        final ConversionResult result = Dictionaries.convertIdempotently(xml);
 
         final MessageDef testRequest = result.dictionary().messageByMsgType("1").orElseThrow();
         assertEquals("TestRequest", testRequest.name());
@@ -350,11 +494,11 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aDataFieldGetsItsLengthPartnerInsertedIntoTheSameAggregate() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimal("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
                     <message name="News" msgtype="B" msgcat="app">
                       <field name="RawData" required="N"/>
                     </message>
-                """, "", "")));
+                """, "", ""));
 
         final MessageDef news = result.dictionary().messageByMsgType("B").orElseThrow();
         assertEquals(
@@ -366,11 +510,11 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void aDataFieldWithNoDeclaredLengthPartnerAnywhereIsRetypedToString() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimal("""
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimal("""
                     <message name="News" msgtype="B" msgcat="app">
                       <field name="Blob" required="N"/>
                     </message>
-                """, "    <field number=\"9011\" name=\"Blob\" type=\"DATA\"/>\n", "")));
+                """, "    <field number=\"9011\" name=\"Blob\" type=\"DATA\"/>\n", ""));
 
         assertEquals("STRING", result.dictionary().fieldsByName().get("Blob").type());
         assertEquals(1, notesFor(result, ArtioDictionaryConverter.RULE_DATA_FIELD_LENGTH).size());
@@ -378,8 +522,8 @@ class ArtioDictionaryConverterTest {
 
     @Test
     void everyNoteNamesTheRuleTheElementTheBeforeTheAfterAndTheReason() {
-        final ConversionResult result = converter.convert(Dictionaries.read(Dictionaries.minimalWithField(
-                "    <field number=\"9012\" name=\"Weird\" type=\"NUMBER\"/>\n")));
+        final ConversionResult result = Dictionaries.convertIdempotently(Dictionaries.minimalWithField(
+                "    <field number=\"9012\" name=\"Weird\" type=\"NUMBER\"/>\n"));
 
         for (final ConversionNote note : result.notes()) {
             assertFalse(note.rule().isBlank());

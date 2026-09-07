@@ -87,6 +87,7 @@ class SpringApplicationOrderFlowIT
         final ArtioRuntime runtime;
         final ShutdownOrderProbe probe;
         final BridgeStats statsBeforeClose;
+        final List<String> publisherDependents;
 
         final ConfigurableApplicationContext context =
             new SpringApplicationBuilder(ArtioBridgeApplication.class, ProbeConfiguration.class)
@@ -134,6 +135,10 @@ class SpringApplicationOrderFlowIT
                     .until(() -> publisher.stats().published() >= 2L * OrderScenario.MESSAGE_COUNT);
             }
             statsBeforeClose = publisher.stats();
+            // The edge that orders bean destruction on the one path the phases do not cover (a
+            // refresh failing after start-up): the runtime's adapter depends on the publisher's.
+            publisherDependents = List.of(
+                context.getBeanFactory().getDependentBeans("bridgePublisherLifecycle"));
         }
         finally
         {
@@ -173,8 +178,13 @@ class SpringApplicationOrderFlowIT
             () -> assertEquals(stats.accepted(), stats.drained(),
                 "close() drained the ring buffer before flushing"),
             () -> assertEquals(0, stats.pendingBytes()),
-            () -> assertTrue(stats.published() >= statsBeforeClose.published(),
-                "the close-time drain can only add publishes"));
+            () -> assertEquals(OrderScenario.MESSAGE_COUNT, stats.accepted() - stats.adminSkipped(),
+                "exactly the scenario's application messages were accepted, admin ones skipped"),
+            () -> assertEquals(statsBeforeClose.accepted(), stats.accepted(),
+                "nothing arrived after the engine stopped: the runtime closed before the publisher"),
+            () -> assertTrue(publisherDependents.contains("artioRuntimeLifecycle"),
+                () -> "artioRuntimeLifecycle must be a dependent of bridgePublisherLifecycle, got " +
+                    publisherDependents));
     }
 
     /** Adds {@link ShutdownOrderProbe} to the application's own context. */

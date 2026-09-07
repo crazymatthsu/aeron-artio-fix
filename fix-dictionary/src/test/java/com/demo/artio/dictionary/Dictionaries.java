@@ -3,7 +3,10 @@ package com.demo.artio.dictionary;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.Objects;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Dictionary fixtures for the tests: the two bundled QuickFIX/J files, and a minimal but complete
@@ -28,6 +31,25 @@ final class Dictionaries {
     static InputStream openBundled(final String resource) {
         return Objects.requireNonNull(
                 Dictionaries.class.getResourceAsStream(resource), "missing test resource " + resource);
+    }
+
+    /**
+     * Converts {@code xml} and proves the conversion is a fixpoint on it: converting the output
+     * again makes no change and renders to byte-identical XML. Every synthetic fixture goes
+     * through here, so a rule that repairs something in a way its own output no longer satisfies
+     * cannot pass.
+     */
+    static ConversionResult convertIdempotently(final String xml) {
+        final ArtioDictionaryConverter converter = new ArtioDictionaryConverter();
+        final ArtioDictionaryWriter writer = new ArtioDictionaryWriter();
+
+        final ConversionResult first = converter.convert(read(xml));
+        final String firstXml = writer.toXml(first.dictionary());
+        final ConversionResult second = converter.convert(read(firstXml));
+
+        assertEquals(List.of(), second.notes(), "converting the converted dictionary must change nothing");
+        assertEquals(firstXml, writer.toXml(second.dictionary()), "and must render to identical bytes");
+        return first;
     }
 
     static FixDictionary read(final String xml) {

@@ -159,6 +159,54 @@ class ExecutionReportsTest
     }
 
     @Test
+    void aNewOrderSingleWithoutOrderQtyIsAnsweredWithABusinessMessageRejectNamingTheTag() throws Exception
+    {
+        final Message order = order(QfjVersion.FIX42, "ORD-9");
+        order.removeField(Tags.ORDER_QTY);
+        order.getHeader().setInt(Tags.MSG_SEQ_NUM, 7);
+
+        final ExecutionReports reports = new ExecutionReports(QfjVersion.FIX42);
+        final List<Message> replies = reports.repliesTo(order);
+
+        assertEquals(1, replies.size(), "a reject, not silence and not an acknowledgement of nothing");
+        final String raw = replies.get(0).toString();
+        final String nextReport = reports.repliesTo(order(QfjVersion.FIX42, "ORD-10")).get(0).toString();
+        assertAll(
+            () -> assertEquals("j", RawFix.field(raw, Tags.MSG_TYPE)),
+            () -> assertEquals("D", RawFix.field(raw, Tags.REF_MSG_TYPE)),
+            () -> assertEquals("7", RawFix.field(raw, Tags.REF_SEQ_NUM)),
+            () -> assertEquals("ORD-9", RawFix.field(raw, Tags.BUSINESS_REJECT_REF_ID)),
+            () -> assertEquals(String.valueOf(ExecutionReports.CONDITIONALLY_REQUIRED_FIELD_MISSING),
+                RawFix.field(raw, Tags.BUSINESS_REJECT_REASON)),
+            () -> assertTrue(RawFix.field(raw, Tags.TEXT).contains("38"), raw),
+            () -> assertNull(RawFix.field(raw, Tags.ORDER_ID), "no order was created"),
+            // The rejected request consumed no identifier: the next real order is the first one.
+            () -> assertEquals("ORDER-1", RawFix.field(nextReport, Tags.ORDER_ID)),
+            () -> assertEquals("EXEC-1", RawFix.field(nextReport, Tags.EXEC_ID)));
+    }
+
+    @Test
+    void aReplaceWithoutOrigClOrdIdIsRejectedTheSameWayAndTheOrderBookIsUntouched() throws Exception
+    {
+        final ExecutionReports reports = new ExecutionReports(QfjVersion.FIX44);
+        final Message replace = Orders.cancelReplace(
+            QfjVersion.FIX44, "ORD-1", "ORD-4", "MSFT", Orders.SIDE_BUY, 150, 101.75);
+        replace.removeField(Tags.ORIG_CL_ORD_ID);
+
+        final List<Message> replies = reports.repliesTo(replace);
+
+        assertEquals(1, replies.size());
+        final String raw = replies.get(0).toString();
+        assertAll(
+            () -> assertEquals("j", RawFix.field(raw, Tags.MSG_TYPE)),
+            () -> assertEquals("G", RawFix.field(raw, Tags.REF_MSG_TYPE)),
+            () -> assertTrue(RawFix.field(raw, Tags.TEXT).contains("41"), raw),
+            // The next real order still gets ORDER-1: the rejected request consumed no identifier.
+            () -> assertEquals("ORDER-1", RawFix.field(
+                reports.repliesTo(order(QfjVersion.FIX44, "ORD-1")).get(0).toString(), Tags.ORDER_ID)));
+    }
+
+    @Test
     void identifierPrefixesCanBeChosenSoTwoVenuesInOneTestDoNotCollide() throws Exception
     {
         final Message report = new ExecutionReports(QfjVersion.FIX42, "VENUE", "FILL")

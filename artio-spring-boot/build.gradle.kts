@@ -178,6 +178,11 @@ val integrationTestTask = tasks.register<Test>("integrationTest") {
     // Gradle can see. Ask for it and it runs.
     outputs.upToDateWhen { false }
     outputs.cacheIf { false }
+    // ...and, belt and braces, told not to track state at all. `Test` is a cacheable task type and
+    // this repository has org.gradle.caching=true, so the two predicates above are what stand
+    // between an unchanged rerun and `FROM-CACHE`; this is the setting that says so in one place,
+    // exactly as amps-test-harness does.
+    doNotTrackState("starts containers and a subprocess")
 
     testLogging {
         showStandardStreams = true

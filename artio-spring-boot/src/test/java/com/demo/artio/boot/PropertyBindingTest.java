@@ -96,4 +96,15 @@ class PropertyBindingTest
                 new TopicRoute("D", "fix.tape.orders", TopicRoute.NO_REQUIRED_TAG)),
             bridge.toBridgeConfig().routes());
     }
+    @Test
+    void theInitiatorReconnectKeysReachTheEngineConfig()
+    {
+        // Added after the engine grew reconnect: without these three keys a Spring initiator could
+        // neither disable nor tune it, while BridgeMain's properties could.
+        final FixEngineConfig config = artio.toFixEngineConfig();
+        assertAll(
+            () -> assertFalse(config.reconnectEnabled(), "reconnect-enabled: false"),
+            () -> assertEquals(250L, config.reconnectInitialBackoffMs()),
+            () -> assertEquals(2500L, config.reconnectMaxBackoffMs()));
+    }
 }

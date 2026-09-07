@@ -106,6 +106,19 @@ class CliArgsTest
     }
 
     @Test
+    void aNegativePortIsPresentButOutOfRangeSoTheConfigurationRejectsItAsSuch()
+    {
+        final CliArgs args = CliArgs.parse(words("acceptor --port -5"));
+
+        assertEquals(-5, args.port(), "parsing keeps the value; the range check is QfjConfig's");
+        final String message = assertThrows(IllegalArgumentException.class, args::toConfig).getMessage();
+        assertAll(
+            () -> assertTrue(message.contains("1..65535"), message),
+            () -> assertTrue(message.contains("-5"), message),
+            () -> assertFalse(message.contains("required"), message));
+    }
+
+    @Test
     void anUnknownOptionIsNamedRatherThanIgnored()
     {
         assertEquals("Unknown option '--nope'",

@@ -72,6 +72,14 @@ public final class Tags
     public static final int LEAVES_QTY = 151;
     /** ExecType. */
     public static final int EXEC_TYPE = 150;
+    /** RefSeqNum. */
+    public static final int REF_SEQ_NUM = 45;
+    /** RefMsgType. */
+    public static final int REF_MSG_TYPE = 372;
+    /** BusinessRejectRefID. */
+    public static final int BUSINESS_REJECT_REF_ID = 379;
+    /** BusinessRejectReason. */
+    public static final int BUSINESS_REJECT_REASON = 380;
 
     /** {@code MsgType} of a NewOrderSingle. */
     public static final String MSG_TYPE_NEW_ORDER_SINGLE = "D";
@@ -83,4 +91,6 @@ public final class Tags
     public static final String MSG_TYPE_CANCEL = "F";
     /** {@code MsgType} of an OrderCancelReject. */
     public static final String MSG_TYPE_CANCEL_REJECT = "9";
+    /** {@code MsgType} of a BusinessMessageReject. */
+    public static final String MSG_TYPE_BUSINESS_REJECT = "j";
 }

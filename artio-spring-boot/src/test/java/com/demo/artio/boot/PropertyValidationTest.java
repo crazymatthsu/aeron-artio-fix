@@ -76,7 +76,7 @@ class PropertyValidationTest
             .run(context -> assertThat(context)
                 .hasFailed()
                 .getFailure()
-                .hasStackTraceContaining("topic"));
+                .hasStackTraceContaining("route[0].topic"));
     }
 
     @Test

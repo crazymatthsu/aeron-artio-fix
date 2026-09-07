@@ -5,6 +5,7 @@ import com.demo.artio.engine.EngineMode;
 import com.demo.artio.engine.FixEngineConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.SmartLifecycle;
 
 import java.util.Objects;
@@ -21,12 +22,20 @@ import java.util.Objects;
  * thread, and is finished before this method returns. That is intentional: an acceptor that
  * "started" before its port was bound would report ready and refuse connections.
  *
- * <p><strong>MAX_VALUE - 1000, not MAX_VALUE.</strong> {@code Integer.MAX_VALUE} is the phase of
- * Spring's own {@code ScheduledAnnotationBeanPostProcessor}, so leaving the top slot alone means
- * the scheduler - and therefore {@link StatsLogger} - stops before the engine does, rather than
- * racing it.
+ * <p><strong>MAX_VALUE - 1000, not MAX_VALUE.</strong> {@code Integer.MAX_VALUE} is
+ * {@code SmartLifecycle.DEFAULT_PHASE}, where Spring Boot's own {@code ThreadPoolTaskScheduler}
+ * bean sits (every {@code ExecutorConfigurationSupport} is a {@code SmartLifecycle} at that phase),
+ * so leaving the top slot alone means the scheduler's executor is stopped before the engine is.
+ * The {@link StatsLogger} task itself is cancelled even earlier: {@code
+ * ScheduledAnnotationBeanPostProcessor} is not a lifecycle bean at all but a listener that cancels
+ * its tasks on {@code ContextClosedEvent}, which {@code doClose()} publishes before any stop phase
+ * runs. Either way the stats line never races a closing engine for its session list.
+ *
+ * <p><strong>Not restartable.</strong> {@link ArtioRuntime#start()} refuses a second call, so a
+ * {@code context.stop()} followed by {@code context.start()} fails here. A stopped context is
+ * finished with; a new one is built for a new run.
  */
-public final class ArtioRuntimeLifecycle implements SmartLifecycle
+public final class ArtioRuntimeLifecycle implements SmartLifecycle, DisposableBean
 {
     /** High, so Spring starts this last and stops it first. */
     public static final int PHASE = Integer.MAX_VALUE - 1000;
@@ -37,7 +46,7 @@ public final class ArtioRuntimeLifecycle implements SmartLifecycle
 
     /**
      * @param runtime the runtime to own; never closed by anything else, in particular not by an
-     *                inferred {@code destroyMethod}.
+     *                inferred {@code destroyMethod} on its own bean.
      */
     public ArtioRuntimeLifecycle(final ArtioRuntime runtime)
     {
@@ -101,6 +110,25 @@ public final class ArtioRuntimeLifecycle implements SmartLifecycle
         {
             callback.run();
         }
+    }
+
+    /**
+     * The fallback for a context that never became active: a refresh that fails after the phases
+     * have started destroys the singletons without running a stop phase, and this is the only
+     * hook left. A no-op on the normal path, where {@link #stop()} has already run; see
+     * {@link BridgePublisherLifecycle#destroy()} for the whole story. Spring destroys this bean
+     * before the publisher's adapter because {@link BridgeConfiguration} declares it dependent on
+     * that one, so the shutdown order holds on this path as well.
+     */
+    @Override
+    public void destroy()
+    {
+        if (runtime.isRunning())
+        {
+            LOGGER.warn("artio runtime still running at bean destruction: no stop phase ran " +
+                "(the refresh failed after start-up?); closing it now");
+        }
+        stop();
     }
 
     @Override

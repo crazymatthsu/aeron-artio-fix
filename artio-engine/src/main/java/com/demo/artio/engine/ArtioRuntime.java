@@ -15,7 +15,6 @@ import org.agrona.collections.LongHashSet;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.AgentRunner;
 import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import uk.co.real_logic.artio.Pressure;
@@ -76,10 +75,26 @@ import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
  * The {@code Session} objects handed out by {@link #sessions()} are safe to <em>identify</em> from
  * another thread but must not be written to from one.
  *
+ * <h2>Reconnect</h2>
+ * An {@link EngineMode#INITIATOR} whose session disconnects re-initiates it from the poll thread,
+ * waiting {@link FixEngineConfig#reconnectInitialBackoffMs()} before the first attempt and doubling
+ * up to {@link FixEngineConfig#reconnectMaxBackoffMs()} after every failure; the back-off resets
+ * once the session is logged on again. Each attempt is announced through
+ * {@link SessionListener#onReconnectAttempt(int, long)}. Nothing is attempted when
+ * {@link FixEngineConfig#reconnectEnabled()} is false, for an acceptor (whose counterparty does the
+ * connecting), or once {@link #close()} has begun. {@link #isRunning()} stays true throughout, so
+ * {@link #isSessionActive()} is what tells a caller whether a {@link #send(Encoder)} can succeed
+ * right now.
+ *
  * <h2>Directories</h2>
  * Each runtime gets its own Aeron directory, archive directory and Artio log directory, all under
- * {@link FixEngineConfig#baseDirectory()} with a unique suffix, so several runtimes can share a
- * JVM. {@link #close()} removes them unless
+ * {@link FixEngineConfig#baseDirectory()}/{@code artio-<runtimeId>}, where the id is
+ * {@code <name>-<mode>-<pid>-<counter>}: unique per JVM and per process, so runtimes can share a
+ * JVM or only a machine. Derived directories are wiped on start (anything there is a crash
+ * leftover). An explicit {@link FixEngineConfig#aeronDirectory()} or
+ * {@link FixEngineConfig#logFileDir()} is never wiped on start: {@link #start()} fails if another
+ * media driver is live in the Aeron directory, and Artio reuses what it finds in the log directory.
+ * {@link #close()} removes every directory, explicit ones included, unless
  * {@link FixEngineConfig#deleteDirectoriesOnClose()} is false.
  *
  * <h2>JVM flags</h2>
@@ -109,9 +124,14 @@ public final class ArtioRuntime implements AutoCloseable
     private final Path aeronDirectory;
     private final Path archiveDirectory;
     private final Path logFileDirectory;
+    /** True when the caller named the directory rather than letting this runtime derive it. */
+    private final boolean aeronDirectoryIsExplicit;
+    private final boolean logFileDirIsExplicit;
 
     private final FixMessageView view = new FixMessageView();
-    private final ManyToOneConcurrentLinkedQueue<Command> commands = new ManyToOneConcurrentLinkedQueue<>();
+    private final CommandQueue commands = new CommandQueue();
+    /** Poll-thread-only: drives the back-off and the re-initiate after an initiator's disconnect. */
+    private final Reconnector reconnector = new Reconnector();
     private final CopyOnWriteArrayList<Session> sessions = new CopyOnWriteArrayList<>();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -124,6 +144,8 @@ public final class ArtioRuntime implements AutoCloseable
     private volatile FixEngine engine;
     private volatile FixLibrary library;
     private volatile AgentRunner agentRunner;
+    /** The library poll thread, once the {@link AgentRunner} is on it; close() must not run there. */
+    private volatile Thread pollThread;
     private volatile boolean shutdownRequested;
     private volatile long logonLatencyNs = -1;
 
@@ -141,13 +163,19 @@ public final class ArtioRuntime implements AutoCloseable
         this.listener = listener == null ? new SessionListener()
         {
         } : listener;
+        // <name>-<mode>-<pid>-<counter>: the counter separates runtimes in one JVM, the pid
+        // separates JVMs on one machine. Without the pid two processes with the same name (a
+        // parallel test worker, a second instance of the same application) derive the same Aeron
+        // directory and wipe each other's live media driver on start.
         this.runtimeId = config.name() + '-' + config.mode().name().toLowerCase() + '-' +
-            INSTANCE_COUNTER.incrementAndGet();
+            ProcessHandle.current().pid() + '-' + INSTANCE_COUNTER.incrementAndGet();
         this.runtimeDirectory = config.baseDirectory().resolve("artio-" + runtimeId);
-        this.aeronDirectory = config.aeronDirectory() != null ?
+        this.aeronDirectoryIsExplicit = config.aeronDirectory() != null;
+        this.aeronDirectory = aeronDirectoryIsExplicit ?
             config.aeronDirectory() : runtimeDirectory.resolve("aeron");
         this.archiveDirectory = runtimeDirectory.resolve("archive");
-        this.logFileDirectory = config.logFileDir() != null ?
+        this.logFileDirIsExplicit = config.logFileDir() != null;
+        this.logFileDirectory = logFileDirIsExplicit ?
             config.logFileDir() : runtimeDirectory.resolve("logs");
     }
 
@@ -215,7 +243,7 @@ public final class ArtioRuntime implements AutoCloseable
             }
 
             agentRunner = new AgentRunner(config.idleStrategy().create(), this::onAgentError, null, new PollAgent());
-            AgentRunner.startOnThread(agentRunner);
+            pollThread = AgentRunner.startOnThread(agentRunner);
 
             LOGGER.info("{} started: mode={} {} {}:{} {}->{} dir={}",
                 runtimeId, config.mode(), config.fixVersion().beginString(), config.host(), config.port(),
@@ -241,9 +269,18 @@ public final class ArtioRuntime implements AutoCloseable
         final MediaDriver.Context driverContext = new MediaDriver.Context()
             .aeronDirectoryName(aeronDirectory.toString())
             .threadingMode(ThreadingMode.SHARED)
-            .dirDeleteOnStart(true)
+            // A derived directory is ours alone (pid and counter are in its name), so anything
+            // already there is a leftover from a crash and can go. An explicit one may belong to a
+            // live driver in another process: never wipe it blindly. With dirDeleteOnStart(false)
+            // Aeron reads the existing CnC file and refuses to start over an active driver, and
+            // only then clears what a dead one left behind; the check below just says so in words.
+            .dirDeleteOnStart(deletesAeronDirectoryOnStart())
             .dirDeleteOnShutdown(config.deleteDirectoriesOnClose())
             .errorHandler(this::onAgentError);
+        if (aeronDirectoryIsExplicit)
+        {
+            failIfAnotherDriverIsLive(driverContext);
+        }
 
         // Recording events are a separate UDP multicast-ish stream nothing here consumes, and the
         // archive's remote control channel would bind a second fixed port - both would collide the
@@ -268,12 +305,41 @@ public final class ArtioRuntime implements AutoCloseable
         return ArchivingMediaDriver.launch(driverContext, archiveContext);
     }
 
+    private void failIfAnotherDriverIsLive(final MediaDriver.Context driverContext)
+    {
+        final File directory = aeronDirectory.toFile();
+        if (CommonContext.isDriverActive(directory, driverContext.driverTimeoutMs(), LOGGER::debug))
+        {
+            throw new IllegalStateException(
+                runtimeId + ": another media driver is live in the explicit aeronDirectory " + directory +
+                    "; give each runtime its own directory, or leave aeronDirectory unset to derive one");
+        }
+    }
+
+    /**
+     * @return true if start-up wipes whatever is in the Aeron directory, which is only safe for a
+     * directory nobody else can be using: a derived one.
+     */
+    boolean deletesAeronDirectoryOnStart()
+    {
+        return !aeronDirectoryIsExplicit;
+    }
+
+    /**
+     * @return true if start-up wipes the Artio log directory. A derived one holds nothing worth
+     * keeping; an explicit one is reused, sequence numbers and message log included.
+     */
+    boolean deletesLogFileDirOnStart()
+    {
+        return !logFileDirIsExplicit;
+    }
+
     private EngineConfiguration engineConfiguration()
     {
         final EngineConfiguration configuration = new EngineConfiguration()
             .libraryAeronChannel(IPC_CHANNEL)
             .logFileDir(logFileDirectory.toString())
-            .deleteLogFileDirOnStart(true);
+            .deleteLogFileDirOnStart(deletesLogFileDirOnStart());
 
         configuration.agentNamePrefix(runtimeId + '-');
         configuration.monitoringFile(runtimeDirectory.resolve("engineCounters").toString());
@@ -361,9 +427,10 @@ public final class ArtioRuntime implements AutoCloseable
         LOGGER.debug("{} library connected, id={}", runtimeId, library.libraryId());
     }
 
-    private void initiateSession(final IdleStrategy idleStrategy)
+    /** @return the request {@code library.initiate(...)} takes, on start-up and on every reconnect. */
+    private SessionConfiguration sessionConfiguration()
     {
-        final SessionConfiguration sessionConfiguration = SessionConfiguration.builder()
+        return SessionConfiguration.builder()
             .address(config.host(), config.port())
             .senderCompId(config.senderCompId())
             .targetCompId(config.targetCompId())
@@ -371,6 +438,11 @@ public final class ArtioRuntime implements AutoCloseable
             .resetSeqNum(config.resetSeqNumsOnLogon())
             .timeoutInMs(config.logonTimeoutMs())
             .build();
+    }
+
+    private void initiateSession(final IdleStrategy idleStrategy)
+    {
+        final SessionConfiguration sessionConfiguration = sessionConfiguration();
 
         final long startedAtNs = System.nanoTime();
         final long deadlineNs = startedAtNs + TimeUnit.MILLISECONDS.toNanos(config.logonTimeoutMs());
@@ -397,8 +469,20 @@ public final class ArtioRuntime implements AutoCloseable
         }
 
         final Session session = reply.resultIfPresent();
+        LOGGER.debug("{} initiate reply completed; session {} is {}", runtimeId, session.id(), session.state());
         while (!session.isActive())
         {
+            // The reply completes once TCP is up, before the logon exchange. If the counterparty
+            // then rejects the logon or drops the connection, the session goes DISCONNECTED and
+            // will never become active: say so now rather than after the whole logon timeout.
+            final SessionState state = session.state();
+            if (state == SessionState.DISCONNECTED || state == SessionState.DISABLED)
+            {
+                throw new IllegalStateException(
+                    runtimeId + ": " + config.host() + ':' + config.port() +
+                        " disconnected before the logon completed (session state " + state +
+                        "); the counterparty rejected the logon or dropped the connection");
+            }
             checkDeadline(deadlineNs, "complete the logon exchange");
             idleStrategy.idle(library.poll(POLL_FRAGMENT_LIMIT));
         }
@@ -490,6 +574,12 @@ public final class ArtioRuntime implements AutoCloseable
      * future completes. Artio back-pressure is retried on the poll thread until
      * {@link FixEngineConfig#replyTimeoutMs()} has passed.
      *
+     * <p>The future completes exceptionally, with an {@link IllegalStateException}, when there is
+     * no session, when the session is not {@code ACTIVE} (still logging on, logging out,
+     * disconnected), when Artio refuses the message with a position that a retry cannot cure, when
+     * back-pressure outlasts the reply timeout, or when the runtime is closed before the message
+     * was written. A completed future means the message was written to the session's log.
+     *
      * @param encoder a generated Artio encoder with its body already set. The session fills in the
      *                header (CompIDs, sequence number, sending time).
      * @return the Aeron position the message was written at.
@@ -558,7 +648,7 @@ public final class ArtioRuntime implements AutoCloseable
         return command.future;
     }
 
-    private void enqueue(final Command command)
+    private void enqueue(final CommandQueue.Command command)
     {
         if (closed.get())
         {
@@ -570,6 +660,9 @@ public final class ArtioRuntime implements AutoCloseable
             command.fail(new IllegalStateException(runtimeId + " has not been started"));
             return;
         }
+        // The checks above are a courtesy, not the guarantee: a caller can pass them and then be
+        // overtaken by close(). CommandQueue is what makes sure a command offered after the poll
+        // thread's final drain is still failed rather than left with a future that never completes.
         commands.offer(command);
     }
 
@@ -587,16 +680,46 @@ public final class ArtioRuntime implements AutoCloseable
         return config;
     }
 
-    /** @return the directory holding this runtime's Aeron, archive and Artio log directories. */
+    /** @return the directory holding this runtime's archive and, unless explicit, its Aeron and Artio log directories. */
     public Path directory()
     {
         return runtimeDirectory;
+    }
+
+    /** @return the Aeron directory in use: the explicit one, or {@code directory()/aeron}. */
+    public Path aeronDirectory()
+    {
+        return aeronDirectory;
+    }
+
+    /** @return the Artio log directory in use: the explicit one, or {@code directory()/logs}. */
+    public Path logFileDir()
+    {
+        return logFileDirectory;
     }
 
     /** @return true between a successful {@link #start()} and {@link #close()}. */
     public boolean isRunning()
     {
         return started.get() && !closed.get();
+    }
+
+    /**
+     * @return true if at least one session this runtime owns is {@code ACTIVE}, i.e. logged on and
+     * able to send. False while an initiator is between a disconnect and a successful reconnect,
+     * and for an acceptor nobody is connected to. A snapshot: the poll thread may change it the
+     * moment this returns.
+     */
+    public boolean isSessionActive()
+    {
+        for (final Session session : sessions)
+        {
+            if (session.isActive())
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -617,10 +740,26 @@ public final class ArtioRuntime implements AutoCloseable
      * engine and the media driver in that order, and finally deletes this runtime's directories.
      *
      * <p>Idempotent, and safe to call on a runtime whose {@link #start()} failed part way through.
+     *
+     * <p><strong>Not from the poll thread.</strong> Every {@link FixMessageSink} and
+     * {@link SessionListener} callback, and every {@link #submit(Consumer)} action, runs on the
+     * library poll thread, and close() waits for that thread: for its sessions to log out and then
+     * for it to stop. Called from there it would wait for itself, so it throws instead and the
+     * runtime stays up. A sink that wants to stop the runtime hands the call to another thread
+     * (an executor, a shutdown latch the main thread waits on).
+     *
+     * @throws IllegalStateException if called on the library poll thread.
      */
     @Override
     public void close()
     {
+        final Thread poller = pollThread;
+        if (poller != null && Thread.currentThread() == poller)
+        {
+            throw new IllegalStateException(
+                runtimeId + ": close() was called on the library poll thread (" + poller.getName() +
+                    "), which it would have to wait for; call it from another thread");
+        }
         if (!closed.compareAndSet(false, true))
         {
             return;
@@ -690,10 +829,43 @@ public final class ArtioRuntime implements AutoCloseable
         {
             return;
         }
-        final File directory = runtimeDirectory.toFile();
+        deleteIfPresent(runtimeDirectory);
+        // An explicit directory is only removed once this runtime actually took it over: a start
+        // that failed because another driver or engine was live in there must leave theirs alone.
+        if (aeronDirectoryIsExplicit && mediaDriver != null)
+        {
+            deleteIfPresent(aeronDirectory);
+        }
+        if (logFileDirIsExplicit && engine != null)
+        {
+            deleteIfPresent(logFileDirectory);
+        }
+    }
+
+    private static void deleteIfPresent(final Path path)
+    {
+        final File directory = path.toFile();
         if (directory.exists())
         {
             IoUtil.delete(directory, true);
+        }
+    }
+
+    /**
+     * Runs a listener callback on the poll thread, swallowing anything it throws: a listener that
+     * blows up must not take the poll thread, and with it the whole runtime, down with it.
+     *
+     * @param notification the callback.
+     */
+    private void notifyListener(final Runnable notification)
+    {
+        try
+        {
+            notification.run();
+        }
+        catch (final RuntimeException e)
+        {
+            LOGGER.error("{}: session listener threw", runtimeId, e);
         }
     }
 
@@ -730,6 +902,12 @@ public final class ArtioRuntime implements AutoCloseable
             {
                 work += requestLogouts();
             }
+            else
+            {
+                // The reconnect back-off is a deadline this loop checks, not a timer thread: the
+                // library and its sessions stay the property of this one thread.
+                work += reconnector.doWork();
+            }
             return work;
         }
 
@@ -746,7 +924,7 @@ public final class ArtioRuntime implements AutoCloseable
                 work++;
             }
 
-            Command command;
+            CommandQueue.Command command;
             while ((command = commands.poll()) != null)
             {
                 work++;
@@ -777,6 +955,17 @@ public final class ArtioRuntime implements AutoCloseable
                         (command.sessionId < 0 ? "is active" : "with id " + command.sessionId)));
                 return true;
             }
+            // Session.trySend does not look at the session state: it encodes and writes whatever
+            // it is given, logon or not, logging out or not. A message written while the session
+            // is not ACTIVE is either never sent or sent into a dying connection, and the caller
+            // would be told a position as if it had gone. Refuse it here instead.
+            final SessionState state = target.state();
+            if (state != SessionState.ACTIVE)
+            {
+                command.fail(new IllegalStateException(
+                    runtimeId + ": session " + target.id() + " is " + state + ", not ACTIVE"));
+                return true;
+            }
             final long position;
             try
             {
@@ -796,6 +985,16 @@ public final class ArtioRuntime implements AutoCloseable
                     return true;
                 }
                 return false;
+            }
+            // Pressure.isBackPressured covers only BACK_PRESSURED (-2) and ADMIN_ACTION (-3), the two
+            // that a retry can cure. Every other negative position - NOT_CONNECTED (-1), CLOSED (-4),
+            // MAX_POSITION_EXCEEDED (-5) - means the message was not written and will not be.
+            if (position < 0)
+            {
+                command.fail(new IllegalStateException(
+                    runtimeId + ": session " + target.id() + " did not accept the message (position " +
+                        position + ')'));
+                return true;
             }
             command.future.complete(position);
             return true;
@@ -838,13 +1037,17 @@ public final class ArtioRuntime implements AutoCloseable
         @Override
         public void onClose()
         {
-            // Runs on this thread, which is the only one allowed to close the library.
-            CloseHelper.quietClose(library);
-            Command command;
-            while ((command = commands.poll()) != null)
+            // Runs on this thread, which is the only one allowed to close the library. Stop the
+            // queue first: from here on every command, queued or still being offered, is failed.
+            final IllegalStateException shuttingDown = new IllegalStateException(runtimeId + " is shutting down");
+            commands.stop(shuttingDown);
+            if (pendingSend != null)
             {
-                command.fail(new IllegalStateException(runtimeId + " is shutting down"));
+                // Held outside the queue while it waited on back-pressure; it has a caller too.
+                pendingSend.fail(shuttingDown);
+                pendingSend = null;
             }
+            CloseHelper.quietClose(library);
         }
 
         @Override
@@ -952,6 +1155,9 @@ public final class ArtioRuntime implements AutoCloseable
             sessions.remove(session);
             LOGGER.info("{}: {} disconnected: {}", runtimeId, sessionKey, reason);
             notifyListener(() -> listener.onDisconnect(sessionKey, reason.name()));
+            // Runs on the poll thread, so the reconnect state needs no synchronisation. A disconnect
+            // this runtime asked for (close(), which sets shutdownRequested) schedules nothing.
+            reconnector.onDisconnected();
             return CONTINUE;
         }
 
@@ -961,27 +1167,133 @@ public final class ArtioRuntime implements AutoCloseable
             LOGGER.debug("{}: session {} (re)started", runtimeId, session.id());
         }
 
-        private void notifyListener(final Runnable notification)
+    }
+
+    // ------------------------------------------------------------------ reconnect
+
+    /**
+     * Re-initiates an {@link EngineMode#INITIATOR}'s session after a disconnect the runtime did not
+     * ask for, with an exponential back-off between
+     * {@link FixEngineConfig#reconnectInitialBackoffMs()} and
+     * {@link FixEngineConfig#reconnectMaxBackoffMs()}.
+     *
+     * <p>Every field here belongs to the library poll thread and only to it:
+     * {@link #onDisconnected()} is called from the session handler, which Artio invokes inside
+     * {@code library.poll}, and {@link #doWork()} is another step of the same duty cycle. The
+     * back-off is a deadline the poll loop looks at, not a timer thread - this class starts no
+     * threads and takes no locks.
+     */
+    private final class Reconnector
+    {
+        /** True when a re-initiate is waiting for its back-off to elapse. */
+        private boolean scheduled;
+        /** Attempts since the last successful logon; 0 while the session is healthy. */
+        private int attempt;
+        /** The back-off used for the scheduled attempt; 0 means "start from the initial one". */
+        private long backoffMs;
+        private long dueAtNs;
+        /** The in-flight {@code library.initiate(...)}, polled to completion by {@link #doWork()}. */
+        private Reply<Session> reply;
+
+        /** Called on the poll thread when a session went away. Schedules the first attempt. */
+        void onDisconnected()
         {
-            try
+            if (!reconnectPossible() || scheduled || reply != null)
             {
-                notification.run();
+                return;
             }
-            catch (final RuntimeException e)
+            schedule();
+            LOGGER.info("{}: session lost; reconnecting to {}:{} in {}ms",
+                runtimeId, config.host(), config.port(), backoffMs);
+        }
+
+        int doWork()
+        {
+            if (attempt != 0 && isSessionActive())
             {
-                LOGGER.error("{}: session listener threw", runtimeId, e);
+                // Logged on again: the next disconnect starts from the initial back-off rather
+                // than from wherever this run of failures left off.
+                attempt = 0;
+                backoffMs = 0;
             }
+            if (reply != null)
+            {
+                return pollReply();
+            }
+            if (!scheduled)
+            {
+                return 0;
+            }
+            if (!reconnectPossible())
+            {
+                scheduled = false;
+                return 0;
+            }
+            if (System.nanoTime() < dueAtNs)
+            {
+                return 0;
+            }
+
+            scheduled = false;
+            attempt++;
+            final int thisAttempt = attempt;
+            final long waitedMs = backoffMs;
+            LOGGER.info("{}: reconnect attempt {} to {}:{} after {}ms",
+                runtimeId, thisAttempt, config.host(), config.port(), waitedMs);
+            notifyListener(() -> listener.onReconnectAttempt(thisAttempt, waitedMs));
+            reply = library.initiate(sessionConfiguration());
+            if (reply == null)
+            {
+                // The library could not even enqueue the request; back off and try again.
+                schedule();
+            }
+            return 1;
+        }
+
+        private int pollReply()
+        {
+            if (reply.isExecuting())
+            {
+                return 0;
+            }
+            final Reply<Session> completed = reply;
+            reply = null;
+            if (completed.hasCompleted())
+            {
+                // TCP is up and the logon is on its way; the back-off is reset once the session
+                // actually goes ACTIVE, so a counterparty that accepts connections and then
+                // refuses every logon still gets backed off.
+                LOGGER.info("{}: reconnect attempt {} connected to {}:{}, session {}",
+                    runtimeId, attempt, config.host(), config.port(), completed.resultIfPresent().id());
+            }
+            else if (reconnectPossible())
+            {
+                schedule();
+                LOGGER.warn("{}: reconnect attempt {} failed ({}); next attempt in {}ms",
+                    runtimeId, attempt, completed.state(), backoffMs, completed.error());
+            }
+            return 1;
+        }
+
+        private void schedule()
+        {
+            backoffMs = backoffMs == 0 ?
+                config.reconnectInitialBackoffMs() :
+                Math.min(config.reconnectMaxBackoffMs(), backoffMs * 2);
+            dueAtNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(backoffMs);
+            scheduled = true;
+        }
+
+        private boolean reconnectPossible()
+        {
+            return config.mode() == EngineMode.INITIATOR && config.reconnectEnabled() &&
+                !shutdownRequested && !closed.get();
         }
     }
 
     // ------------------------------------------------------------------ commands
 
-    private abstract static class Command
-    {
-        abstract void fail(Throwable error);
-    }
-
-    private static final class SendCommand extends Command
+    private static final class SendCommand extends CommandQueue.Command
     {
         private final long sessionId;
         private final Encoder encoder;
@@ -1002,7 +1314,7 @@ public final class ArtioRuntime implements AutoCloseable
         }
     }
 
-    private static final class SubmitCommand extends Command
+    private static final class SubmitCommand extends CommandQueue.Command
     {
         private final Consumer<FixLibrary> action;
         private final CompletableFuture<Void> future = new CompletableFuture<>();

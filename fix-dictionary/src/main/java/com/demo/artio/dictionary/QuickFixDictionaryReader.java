@@ -124,7 +124,10 @@ public final class QuickFixDictionaryReader {
                 // Artio skips a nameless entry outright; do the same so the model matches.
                 continue;
             }
-            final boolean required = "Y".equals(element.getAttribute("required"));
+            // QuickFIX/J's DataDictionary compares the flag with equalsIgnoreCase, so a venue file
+            // with required="y" is enforced by QuickFIX/J; Artio's parser only recognises "Y" and
+            // would silently read the same entry as optional. The writer always emits Y or N.
+            final boolean required = "Y".equalsIgnoreCase(element.getAttribute("required"));
             switch (element.getNodeName()) {
                 case "field" -> entries.add(new FieldRef(name, required));
                 case "component" -> entries.add(new ComponentRef(name, required));

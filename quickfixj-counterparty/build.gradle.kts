@@ -94,8 +94,9 @@ val integrationTestTask = tasks.register<Test>("integrationTest") {
     classpath = integrationTest.runtimeClasspath
     shouldRunAfter(tasks.test)
     workingDir = rootProject.projectDir
-    // Real sockets and threads: a cached "up to date" would be a green build that ran nothing.
-    outputs.upToDateWhen { false }
+    // Real sockets and threads: an "up to date" or build-cache hit would be a green build that
+    // ran nothing, so the task is never tracked at all.
+    doNotTrackState("binds ports and runs real sessions")
     testLogging {
         showStandardStreams = false
     }
