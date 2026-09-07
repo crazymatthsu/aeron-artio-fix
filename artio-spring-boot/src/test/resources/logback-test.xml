@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only logging. Boot's logging system prefers logback-test.xml over the packaged
+  logback-spring.xml, so the unit suite gets this instead: WARN everywhere except this project's own
+  loggers, which stay at INFO so a lifecycle assertion that fails has the lifecycle lines next to it.
+
+  The unit suite starts eight small application contexts; at Spring's default INFO that is eight
+  banners' worth of start-up chatter around four assertions.
+-->
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %-26.-26logger{0} %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.demo.artio" level="INFO"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

@@ -1,0 +1,83 @@
+# Code review record (phase 6)
+
+Read-only reviews of every module, run on Fable after implementation, with
+the fix status of each finding. Severity is the reviewer's ranking within a
+module. Status: `open`, `fixed`, `wontfix` (with reason), `test-added`.
+
+## artio-amps-bridge
+
+| # | Finding | Location | Status |
+| --- | --- | --- | --- |
+| B1 | `close()` drain loop breaks when `ringBuffer.read` returns 0, but Agrona returns 0 after consuming a padding record at the buffer tail (head exactly at padding), so records at index 0.. are abandoned and logged as "not published": silent loss at shutdown. Fix: on `read == 0` break only if `ringBuffer.size()` is unchanged. | `AmpsFixPublisher.java` close drain loop | open |
+| B2 | `guaranteedPublishing` never replays: on disconnect the port closes the `Client` (discarding its `MemoryPublishStore`) and the factory builds a fresh client with an empty store and a new nanoTime-suffixed name. Fix: keep one `Store` in the port, hand it to every new `Client`, use a stable client name when the store is on. | `AmpsClientConnection.java`, `AmpsClientPort.java` | open |
+| B3 | `BridgeMain` shutdown hook waits `flushTimeoutMs + 5 s` but worst-case clean-up is about 30 s (logout + drain + agent join + flush); steps 1 and 3 of `close()` share one deadline so the caller-thread drain can get zero budget. Fix: derive the hook wait from engine shutdown timeout + 2 x flush timeout + agent close timeout; give the final drain its own budget. | `BridgeMain.java`, `AmpsFixPublisher.java` | open |
+| B4 | Publisher agent allocates a bound method reference per `doWork` (`this::onRingMessage`); under `BUSY_SPIN` that is one allocation per spin. Fix: cache it in a final field. | `AmpsFixPublisher.java` doWork | open |
+| B5 | `start()` after `close()` launches an agent thread that no later `close()` stops. Fix: throw `IllegalStateException` when closed. | `AmpsFixPublisher.java` start/close | open |
+| B6 | Route index gaps and a lone `route[0].requiredTag` are silently ignored in `fromProperties`; `(int)` casts truncate. Fix: scan all `bridge.route[` keys, throw on any index beyond the parsed count, range-check ints. | `BridgeConfig.java` fromProperties | open |
+| B7 | `runtimeOnly(libs.slf4j.simple)` on a `java-library` leaks into consumers' runtime classpath (Spring Boot gets two SLF4J bindings). Fix: a dedicated configuration added only to the `run`/`sowDump` classpath. | `artio-amps-bridge/build.gradle.kts` | open |
+| B8 | Disconnect detected in `flush()` leaves reconnect/lost counters untouched; first connect after a start-up refusal is logged as a reconnect with 0 lost. Fix: `wasConnected` flag. | `AmpsClientPort.java` | open |
+| B9 | `pendingMessages()` can read -1 because `drained` increments before the producer's `accepted`. Fix: increment `accepted` before `commit`. | `AmpsFixPublisher.java` | open |
+| B10 | Unit test for `BLOCK` cannot fail: the in-memory port keeps up, so `dropped == 0` holds under both policies. Fix: gate the port behind a latch so the ring fills. | `AmpsFixPublisherTest.java` | open |
+| B11 | `sowDump` task forwards no `-Dbridge.*` although `SowDump` reads `bridge.amps.uri`; `--timeout-ms x` throws a raw `NumberFormatException`; `--filter` with `--replay` silently ignored. | `build.gradle.kts`, `SowDump.java` | open |
+
+Clean: `FixTags` scanning (first/last field, empty value, `111=`/`411=`, no trailing SOH), framing, single-producer use, bounded `BLOCK` wait, exception ordering in `flush`, defaults vs `amps-config.xml`, JVM flags on every task.
+
+## amps-server and amps-test-harness
+
+| # | Finding | Location | Status |
+| --- | --- | --- | --- |
+| H1 | Every subprocess timeout is unreachable: `readAllBytes()` blocks until the child exits, so `waitFor(timeout)` and `destroyForcibly()` never act; a stalled podman machine hangs the Gradle worker forever. Fix: redirect output to a file (or drain on a daemon thread), then `waitFor(timeout)`, then destroy the process tree and throw with what was captured. | `AmpsComposeServer.java` run/logs/isRunning/exitsZero | open |
+| H2 | `SowKeyBehaviourIT` keyless-publish pin asserts `records.size() >= 1` over the whole topic, so it passes whenever another test's records exist. Fix: filter for the specific ExecID and assert exactly one. | `SowKeyBehaviourIT.java` | open |
+| H3 | A failed `up -d` never sets `up`, so `close()` skips `down` and leaks the compose network/container/data dir; `InterruptedException` from `awaitReady` escapes the `RuntimeException | Error` catch and leaks a running AMPS. Fix: set `up = true` before running, catch `Exception`, restore interrupt, `close()`, rethrow. | `AmpsComposeServer.java` up() | open |
+| H4 | Compose ladder can fall back to `docker compose` while `engine()` stays `podman`, so `logs`/`ps`/`restart` look at the wrong engine. Fix: derive the engine from the chosen compose command, or drop the cross-engine fallback. | `AmpsComposeServer.java`, `amps.sh` | open |
+| H5 | `CONTAINER_ENGINE=docker` always skips: `docker image exists` is podman-only. Fix: `image inspect`. | `AmpsComposeServer.java` unavailableReason | open |
+| H6 | Any `podman image exists` failure (exit 125, machine stopped) is reported as "image absent". Fix: treat only exit 1 as absent. | `AmpsComposeServer.java` | open |
+| H7 | `die` inside `compose_command` runs in a `$(...)` subshell and its status is discarded by `read <<<`, so the script continues and fails with `-p: command not found`. Fix: capture with `|| exit 1`. | `amps.sh` ensure_compose | open |
+| H8 | `--help`, `printenv`, `logs`, `status` create data directories and die on an unknown flow before dispatch. Fix: move the flow check and `mkdir` into `cmd_start`. | `amps.sh` | open |
+| H9 | `wait` only checks the container is running in the not-ready branch, so a container that dies after initialising waits the full timeout. Fix: check on every iteration. | `amps.sh` cmd_wait | open |
+| H10 | Ports published on all interfaces. Fix: bind to `127.0.0.1:`. | `docker-compose.yml` | open |
+
+Clean: `amps-config.xml` (topics, keys, file names, journal entries, no `--`, no readiness phrase in comments), `checkConfigXml`, `integrationTest` task wiring, `SowReader` (verified stream termination from bytecode), env passing, unit tests for `unavailableReason`.
+
+Test gaps noted: `checkConfigXml` should fail if a flow config contains the readiness marker text; `run()` timeout with a `sleep 999` command; `close()` after a failed `up -d`; `countFromEpoch` with several messages.
+
+## artio-engine and fix-codecs
+
+| # | Finding | Location | Status |
+| --- | --- | --- | --- |
+| E1 | `send` completes the future with a position even when the session is not `ACTIVE`: Artio 0.168 `Session.trySend` does not guard on state and `Pressure.isBackPressured` only covers -2/-3, so `NOT_CONNECTED (-1)` / `CLOSED (-4)` fall through as success. Fix: fail the command when `state() != ACTIVE` and when `position < 0`. | `ArtioRuntime.java` attemptSend | open |
+| E2 | `runtimeId` is `<name>-<mode>-<per-JVM counter>` under `java.io.tmpdir` with `dirDeleteOnStart(true)`, so two processes (parallel Gradle ITs, two app instances with the same name) wipe each other's live Aeron directories. Fix: include the PID in the id, or `dirDeleteOnStart(false)`. | `ArtioRuntime.java` | open |
+| E3 | `integrationTest` uses `upToDateWhen { false }` only; `Test` is cacheable and `org.gradle.caching=true`, so an unchanged rerun is `FROM-CACHE` without running. Fix: `doNotTrackState(...)` (apply to every module's `integrationTest`). | `artio-engine/build.gradle.kts` and siblings | open |
+| E4 | `close()` called from the poll thread (a sink or listener calling it inside a callback) parks the poll thread waiting on its own progress, then `AgentRunner.close()` self-joins and returns, and engine/driver close while the library is still open. Fix: keep the poll thread reference and throw `IllegalStateException` when `close()` runs on it. | `ArtioRuntime.java` close | open |
+| E5 | `enqueue`/`close` race: a command offered after `onClose()` drained the queue is never consumed, its future never completes. Fix: a `volatile pollThreadStopped` flag checked after `offer`, failing the command. | `ArtioRuntime.java` enqueue/onClose | open |
+| E6 | Initiator `start()` waits the full `logonTimeoutMs` after the counterparty rejects the logon (only `isActive()` and the deadline are checked). Fix: throw as soon as `session.state() == DISCONNECTED`. | `ArtioRuntime.java` initiate wait | open |
+| E7 | Initiator never reconnects after a disconnect and `isRunning()` stays true, so every later `send` fails for the life of the process. Fix: re-initiate with back-off on the poll thread when not shutting down, or expose session health and document. | `ArtioRuntime.java` onDisconnect | open |
+| E8 | `FixMessageView.unwrap()` clears only buffer/offset/length; a retained view still answers `msgType()`, `sequenceNumber()`, `sessionKey()`, `isValid()` with stale values. Fix: reset those too. | `FixMessageView.java` | open |
+| E9 | Config gaps: `name` is a path component but not checked for separators; an explicit `aeronDirectory` shared by two runtimes hits E2; an explicit `logFileDir` is wiped on every start but not deleted on close. Fix: reject separators; when a directory is explicit set the delete-on-start flags false. | `FixEngineConfig.java`, `ArtioRuntime.java` | open |
+| E10 | `LoggingSink()` javadoc says application messages only but passes `includeAdmin = true`. | `LoggingSink.java` | open |
+| E11 | `fix-codecs` generation task inputs use absolute-path sensitivity and omit the `fix.codecs.*` system properties, so cache entries never hit across checkouts. Fix: `PathSensitivity.NONE` on the dictionary input, classpath normaliser on the generator classpath, declare the properties. | `fix-codecs/build.gradle.kts` | open |
+| E12 | Test quality: the "no session" initiator test only exercises the closed path; `logonLatency().toMillis() >= 0` cannot fail; one `SinkTest` method has no assertions. | `ArtioInitiatorToQuickfixjIT.java`, `SinkTest.java` | open |
+
+Clean: hot path allocates nothing per message; no per-message INFO logging outside `LoggingSink`; `isAdmin()` set correct; `msgTypeAsString` cache correct; dictionary wiring correct for both modes; ITs use free ports and Awaitility; JVM flags on every task; lint scoped to `fix-codecs` only.
+
+Test gaps noted: send on a not-active session fails; `close()` from a callback; concurrent send vs close completes every future; rejected authentication fails fast; a throwing sink still receives the next message; initiator disconnect behaviour; view after `unwrap()`.
+
+## fix-dictionary and quickfixj-counterparty
+
+| # | Finding | Location | Status |
+| --- | --- | --- | --- |
+| D1 | The duplicate-field rule does not model Artio's walk: Artio recurses into components AND groups with one tag set per message; the converter only compares direct fields against component-reachable tags, so a duplicate via a group, via two components, or via a nested component passes with zero notes and `ArtioDictionaryCheck` rejects it. `fixDataFields` can also insert a direct `XxxLength` already reachable via a component. Fix: walk each message exactly as Artio does (entry order, recurse into groups and components, one tag set), drop the later direct occurrence with a note, run the same walk over components. | `ArtioDictionaryConverter.java` | open |
+| D2 | Enum de-dup steals a later value's identifier: `ONE, ONE, ONE_2` becomes `ONE, ONE_2, ONE_2_2`, renaming a value that was unique in the source. Fix: pre-compute all post-rewrite names for the field and make `uniquify` avoid them. | `ArtioDictionaryConverter.java` convertEnumValues/uniquify | open |
+| D3 | Reader treats `required="y"` as not required (QuickFIX/J is case-insensitive), writer emits `N`, no note. Fix: case-insensitive read, normalise to `Y`. | `QuickFixDictionaryReader.java` | open |
+| D4 | CLI: `QfjConfig` validation runs outside the `IllegalArgumentException` catch, so `--port 0`, `--port 70000`, `--heartbeat 0`, equal comp ids print a stack trace with the wrong exit code; `--port -5` reports "required". Fix: move `toConfig()` into the try; distinguish missing from negative. | `QfjMain.java`, `CliArgs.java` | open |
+| D5 | Scenario mode registers no shutdown hook, so Ctrl-C during the wait exits without Logout. Fix: register the hook before `start()` in both paths. | `QfjMain.java` | open |
+| D6 | Acceptor ignores a NewOrderSingle without `OrderQty` (`getDouble` throws `FieldNotFound`, WARN, no reply). Fix: default to 0 as the replace path does, or reply with a BusinessMessageReject. | `ExecutionReports.java`, `QfjAcceptor.java` | open |
+| D7 | Tests: a rejection-reason test asserts only a fixed prefix; a CLI test calls `main`, which `System.exit`s on failure and would kill the test worker; no synthetic fixture asserts byte-level idempotency. | `ArtioDictionaryCheckTest.java`, `ConvertDictionaryCliTest.java`, `ArtioDictionaryConverterTest.java` | open |
+
+Clean: `toJavaName` matches Artio's own rewrite; keyword set complete; writer escaping; stable field order; groups and components preserved; reader disallows DOCTYPE; the check parses the serialised XML; Gradle wiring; counterparty thread-safety (copy-on-write lists plus one monitor); session settings per role; execution reports carry every required tag of both dictionaries; orders valid; IT uses free ports and awaits.
+
+Test gaps noted: idempotency on every synthetic fixture; duplicates via group/components; the enum-steal case; writer escaping; `required="y"`, FIXT root, DOCTYPE rejected; validate generated messages with QuickFIX/J's `DataDictionary.validate`; CLI exit codes; scenario Ctrl-C sends Logout.
+
+## artio-spring-boot
+
+(reviewed after phase 4 completes)

@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# AMPS runtime state written by amps-server/scripts/amps.sh (SOW, journal, stats)
+amps-server/data/
+
+# AMPS release tarballs: licensed downloads, never committed
+amps-server/vendor/*.tar
+amps-server/vendor/*.tar.gz
+
+# Aeron media driver directories left by a crashed run
+aeron-*/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store

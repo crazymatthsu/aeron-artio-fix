@@ -1,0 +1,70 @@
+# Build an AMPS server image from an official 60East release tarball.
+#
+# WHEN YOU NEED THIS
+# ------------------
+# Only when you do not already have an AMPS image. This repository defaults to
+# localhost/amps-demo:5.3.5.135, built by the sibling amps-demo project from
+# the same recipe, so on a machine that has run that project there is nothing
+# to do here.
+#
+# There is no public AMPS server image to fall back on. 60East ships the
+# server as a licensed release tarball only. (docker.io/amps/ce calls itself
+# "AMPS Community Edition" and is an unrelated Apache/MySQL/PHP image with no
+# ampServer in it.)
+#
+# HOW
+# ---
+#   1. Download the Linux server tarball for your edition from
+#      https://www.crankuptheamps.com/evaluate/ (behind an email sign-up).
+#      The file is named like AMPS-5.3.5.135-Release-Linux.tar.gz.
+#   2. Drop it in amps-server/vendor/ (gitignored; see vendor/README.md).
+#   3. Build, then point the scripts at what you built:
+#
+#        podman build --platform linux/amd64 -f amps-server/Containerfile \
+#            -t artio-amps:5.3.5.135 \
+#            --build-arg AMPS_TARBALL=AMPS-5.3.5.135-Release-Linux.tar.gz \
+#            amps-server
+#
+#        AMPS_IMAGE=localhost/artio-amps:5.3.5.135 amps-server/scripts/amps.sh start
+#        AMPS_IMAGE=localhost/artio-amps:5.3.5.135 ./gradlew :amps-test-harness:integrationTest
+#
+# The final argument is the BUILD CONTEXT (amps-server), which is why the COPY
+# below is `vendor/...` and not `amps-server/vendor/...`.
+#
+# --platform linux/amd64 is required on Apple Silicon and harmless elsewhere:
+# the AMPS distribution is Linux x86_64 only, so the image must be amd64 even
+# when the host is not, and it then runs emulated. Everything that waits on
+# this server (the wait loop, the harness timeouts) is sized for that.
+
+FROM docker.io/library/rockylinux:9
+
+ARG AMPS_TARBALL=AMPS-5.3.5.135-Release-Linux.tar.gz
+
+# AMPS ships self-contained; it needs little beyond the C++ runtime.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        libstdc++ \
+        libatomic \
+        ca-certificates \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY vendor/${AMPS_TARBALL} /tmp/amps-dist
+
+# -xf, not -xzf: 60East ships some releases as a plain .tar and others gzipped,
+# and tar detects the compression itself.
+RUN mkdir -p /opt/amps \
+    && tar -xf /tmp/amps-dist -C /opt/amps --strip-components=1 \
+    && rm -f /tmp/amps-dist \
+    && test -x /opt/amps/bin/ampServer
+
+# The layout docker-compose.yml bind-mounts over: the flow directory onto
+# /amps/config, the host data directory onto /amps/data. Creating them here
+# means the image also runs standalone, with the config baked in.
+RUN mkdir -p /amps/config /amps/data/sow /amps/data/journal /amps/data/stats
+
+WORKDIR /amps/data
+
+EXPOSE 9007 9008 8085
+
+ENTRYPOINT ["/opt/amps/bin/ampServer"]
+CMD ["/amps/config/amps-config.xml"]

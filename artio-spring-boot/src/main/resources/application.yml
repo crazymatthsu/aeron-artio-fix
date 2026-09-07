@@ -1,0 +1,134 @@
+# ---------------------------------------------------------------------------
+# The bridge's configuration under Spring Boot. Every key here is also a key
+# `BridgeMain` understands, so `artio-amps-bridge/bridge.properties` and this
+# file are two spellings of one configuration (see the README's YAML reference
+# and BridgeMainPropertyAliases for the five keys that are not identical).
+#
+# Everything below is written out even where it repeats the record default,
+# because this file IS the reference: `ArtioProperties` and `BridgeProperties`
+# carry the same defaults, so deleting a line changes nothing but hides it.
+#
+# Overriding, in increasing precedence:
+#   ./gradlew :artio-spring-boot:bootRun -Dartio.port=9881
+#   java ... -jar artio-spring-boot.jar --artio.port=9881
+#   ARTIO_PORT=9881 java ... -jar artio-spring-boot.jar
+#
+# The three --add-opens/--add-exports flags are NOT optional; see the README.
+# ---------------------------------------------------------------------------
+
+spring:
+  application:
+    name: artio-amps-bridge
+  main:
+    # No servlet stack: `spring-boot-starter` without `-web` already deduces
+    # this, and saying it out loud means a dependency that happens to drag in
+    # spring-web cannot start a web server next to the FIX engine.
+    web-application-type: none
+    banner-mode: "off"
+
+artio:
+  # false leaves the ArtioRuntime bean out of the context entirely: no media
+  # driver, no archive, no bound port. That is how the unit tests load this
+  # application.
+  enabled: true
+  # acceptor (bind and wait) or initiator (connect out).
+  mode: acceptor
+  # Labels thread names, directories and log lines. Need not be unique.
+  name: bridge
+  # Bind address for an acceptor; remote address for an initiator.
+  host: 0.0.0.0
+  port: 9880
+  # From this engine's point of view: 49 on what it sends, 56 on what it
+  # receives.
+  sender-comp-id: ARTIO
+  target-comp-id: QFJ
+  # FIX.4.2 or FIX.4.4. 4.2 works because :fix-codecs generates the dictionary.
+  fix-version: FIX.4.2
+  heartbeat-interval-sec: 30
+  # Parent of the derived Aeron, archive and Artio log directories. Blank means
+  # java.io.tmpdir; each runtime gets a unique subdirectory under it.
+  base-directory: ""
+  # Send ResetSeqNumFlag(141)=Y at logon. Initiator-side setting.
+  reset-seq-nums-on-logon: true
+  # How the library poll thread idles: BACKOFF, BUSY_SPIN or SLEEPING.
+  idle-strategy: BACKOFF
+  # How long start() waits for an initiator's session to go active.
+  logon-timeout-ms: 20000
+  # Artio's engine/library reply timeout.
+  reply-timeout-ms: 10000
+  # How long close() waits for a graceful FIX logout before pulling the plug.
+  shutdown-timeout-ms: 5000
+  delete-directories-on-close: true
+  # Compose a LoggingSink ahead of the publisher, so received messages appear
+  # on the console as printable FIX. A demo affordance: it builds one String
+  # per message. Turn it off and the receive path allocates nothing.
+  log-messages: true
+
+bridge:
+  # false leaves the AmpsFixPublisher bean out of the context; the engine then
+  # accepts sessions and publishes nowhere.
+  enabled: true
+  # The /amps/fix path is not decoration: it selects the server-side FIX
+  # parser, which is what makes SOW keys like /11 and content filters over tag
+  # numbers work. Connect on /amps/json and you get a connection and silence.
+  uri: tcp://localhost:9007/amps/fix
+  client-name: artio-bridge
+  # Every application message goes here unconditionally. No SOW key, so nothing
+  # can be silently collapsed; journalled, so it is the recovery path for
+  # anything a route declines. Blank publishes only what the routes match.
+  default-topic: fix.raw
+  # Session-level traffic (Logon, Heartbeat, ...), only when the next key is
+  # true. Off by default: a heartbeat per session per interval would be the
+  # largest and least useful stream in the instance.
+  admin-topic: fix.admin
+  publish-admin-messages: false
+  # The off-heap hand-off buffer between Artio's poll thread and the publisher
+  # thread. A power of two; 4 MiB is roughly 20 000 FIX messages in flight.
+  ring-buffer-capacity-bytes: 4194304
+  # DROP_AND_COUNT (default) or BLOCK. BLOCK holds the Artio poll thread for up
+  # to overflow-block-timeout-ms while the publisher catches up, and drops
+  # after that; keep the timeout well under the heartbeat interval.
+  overflow-policy: DROP_AND_COUNT
+  overflow-block-timeout-ms: 1000
+  # How long close() waits for AMPS to acknowledge everything, and the logon
+  # timeout when connecting.
+  flush-timeout-ms: 10000
+  # Reconnect back-off after an AMPS disconnect: doubles from the first to the
+  # ceiling. Messages arriving while disconnected are counted, not queued.
+  reconnect-initial-backoff-ms: 250
+  reconnect-max-backoff-ms: 30000
+  # true installs a client-side publish store, so messages already handed to
+  # the client are replayed after a reconnect instead of being lost. In memory
+  # only - it does not survive this process dying.
+  guaranteed-publishing: false
+  # How the publisher agent idles when the ring buffer is empty.
+  idle-strategy: BACKOFF
+  # How often StatsLogger prints the counters and the session list. 0 disables
+  # it, which is what the integration tests use.
+  stats-log-interval-ms: 5000
+
+  # --- routing --------------------------------------------------------------
+  # Deliberately NOT listed here. Leaving `bridge.route` unset means
+  # BridgeConfig.DEFAULT_ROUTES, which is the artio-fix flow's rule set:
+  #
+  #   35=D / 35=G / 35=F  -> fix.orders       requires tag 11 (ClOrdID)
+  #   35=8                -> fix.execs        requires tag 17 (ExecID)
+  #   35=8                -> fix.order.state  requires tag 37 (OrderID)
+  #
+  # Writing them out here would be documentation with a cost: `route` is
+  # all-or-nothing, and a reader who edits one entry in place gets a different
+  # rule set than a reader who overrides the list from another source. To
+  # change the rules, define the whole list - in this file or any other source:
+  #
+  #   route:
+  #     - msg-type: D
+  #       topic: fix.orders
+  #       required-tag: 11
+  #     - msg-type: "8"
+  #       topic: fix.execs
+  #       required-tag: 17
+  #
+  # required-tag is the destination topic's SOW key, and checking it is a
+  # CORRECTNESS requirement: AMPS accepts a SOW publish that lacks the topic's
+  # key and silently stores every such message under one shared record.
+  # Quote "8" - unquoted it is the integer 8 and the binder will say so.

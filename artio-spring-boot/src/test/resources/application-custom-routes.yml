@@ -1,0 +1,51 @@
+# Loaded by PropertyBindingTest through @ActiveProfiles("custom-routes"), on top of the shipped
+# application.yml. Everything here differs from the default, so a value that arrives unchanged in
+# the test means the key did not bind - not that it happened to agree.
+#
+# The route list is the point of the file: `bridge.route` is all-or-nothing, and the two rules below
+# must REPLACE BridgeConfig.DEFAULT_ROUTES' five, not be added to them.
+
+artio:
+  enabled: false
+  mode: initiator
+  name: binding-test
+  host: 127.0.0.1
+  port: 19999
+  sender-comp-id: SPRING
+  target-comp-id: VENUE
+  fix-version: FIX.4.4
+  heartbeat-interval-sec: 7
+  base-directory: /tmp/artio-binding-test
+  reset-seq-nums-on-logon: false
+  idle-strategy: SLEEPING
+  logon-timeout-ms: 1234
+  reply-timeout-ms: 2345
+  shutdown-timeout-ms: 3456
+  delete-directories-on-close: false
+  log-messages: false
+
+bridge:
+  enabled: false
+  uri: tcp://amps.example.com:19007/amps/fix
+  client-name: binding-test-client
+  default-topic: fix.tape
+  admin-topic: fix.session
+  publish-admin-messages: true
+  ring-buffer-capacity-bytes: 65536
+  overflow-policy: BLOCK
+  overflow-block-timeout-ms: 42
+  flush-timeout-ms: 4321
+  reconnect-initial-backoff-ms: 111
+  reconnect-max-backoff-ms: 2222
+  guaranteed-publishing: true
+  idle-strategy: BUSY_SPIN
+  stats-log-interval-ms: 0
+  # Kebab-case here, camelCase in bridge.properties: relaxed binding makes both the same key, which
+  # is what lets one configuration serve BridgeMain and this application.
+  route:
+    - msg-type: "8"
+      topic: fix.execs
+      required-tag: 17
+    - msg-type: D
+      topic: fix.tape.orders
+      # no required-tag: an unkeyed topic needs no guard, and the default is 0

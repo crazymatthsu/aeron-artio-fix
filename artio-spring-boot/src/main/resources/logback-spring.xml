@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Console logging for a FIX gateway: one compact line per event, and the two
+  frameworks that would otherwise drown it kept where they are useful.
+
+  `logback-spring.xml` rather than `logback.xml` so Spring Boot owns the
+  initialisation (profiles, `<springProperty>`, and the deferred startup that
+  makes `logging.level.*` in application.yml work). It is packaged into the fat
+  jar, so `java -jar` and `bootRun` log identically.
+
+  A test source set that wants silence puts a `logback-test.xml` on its own
+  classpath; Boot's logging system prefers that over this file.
+-->
+<configuration>
+    <!--
+      HH:mm:ss.SSS rather than a full ISO timestamp: everything here is read
+      live next to a FIX session, where the interesting axis is milliseconds
+      since the logon, not the date. The logger is abbreviated to its simple
+      name and padded to 26, which fits AmpsFixPublisher, ArtioRuntime and
+      BridgePublisherLifecycle without wrapping.
+    -->
+    <property name="CONSOLE_PATTERN"
+              value="%d{HH:mm:ss.SSS} %-5level %-26.-26logger{0} %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      This project's own output: the lifecycle lines, the received messages
+      when artio.log-messages is true, and the periodic stats line. INFO is the
+      level everything worth watching is logged at.
+    -->
+    <logger name="com.demo.artio" level="INFO"/>
+
+    <!--
+      Artio and Aeron at INFO. They are not noisy at INFO - Artio logs session
+      acquisition, logon and disconnect, and Aeron logs the driver's context
+      once at start-up - and those are exactly the lines you want when a
+      counterparty cannot connect. Turn either to DEBUG to see per-message
+      Artio internals; expect a lot.
+    -->
+    <logger name="uk.co.real_logic.artio" level="INFO"/>
+    <logger name="io.aeron" level="INFO"/>
+    <logger name="org.agrona" level="INFO"/>
+
+    <!--
+      The AMPS client logs a stack trace at INFO on every reconnect attempt,
+      and the bridge already counts and reports disconnects itself
+      (BridgeStats.reconnects / lostWhileDisconnected). WARN keeps the real
+      failures and drops the duplication.
+    -->
+    <logger name="com.crankuptheamps" level="WARN"/>
+
+    <!-- Spring says what it is doing at start-up and is quiet afterwards. -->
+    <logger name="org.springframework" level="INFO"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
