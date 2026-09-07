@@ -50,7 +50,7 @@ out by hand and [`docs/03` section 8](../docs/03-artio-amps-bridge-design.md) ex
 ```
  phase                                start ▼            stop ▲
  ─────────────────────────────────────────────────────────────────────────────
- MAX (Integer.MAX_VALUE)   Spring's scheduler      4     1   (StatsLogger stops)
+ MAX (DEFAULT_PHASE)   Boot's ThreadPoolTaskScheduler  4     1
  MAX-1000  ArtioRuntimeLifecycle      3     2   runtime.close()   ← engine first
     0      (nothing; room for probes)
  MIN+1000  BridgePublisherLifecycle   2     3   publisher.close() ← drain + flush
@@ -62,9 +62,13 @@ out by hand and [`docs/03` section 8](../docs/03-artio-amps-bridge-design.md) ex
 * **Stop**: the engine must go down **first**, so the ring buffer stops filling and the publisher's
   `close()` can drain what is left and `publishFlush` it. Closing the publisher first would leave
   Artio delivering into a stopped agent and count the tail of the session as dropped.
-* `ArtioRuntimeLifecycle` deliberately sits at `MAX-1000` rather than `MAX`, leaving the top slot to
-  Spring's `ScheduledAnnotationBeanPostProcessor` — so the stats logger stops before the engine
-  instead of racing a closing one for its session list.
+* `ArtioRuntimeLifecycle` deliberately sits at `MAX-1000` rather than `MAX`, so the stats logger has
+  already stopped before the engine does instead of racing a closing one for its session list. What
+  guarantees that is **not** `ScheduledAnnotationBeanPostProcessor` occupying the top phase — it is
+  not a lifecycle bean at all in Spring 6.2; it cancels `@Scheduled` tasks on `ContextClosedEvent`,
+  which fires *before* any stop phase runs. Boot's `ThreadPoolTaskScheduler` is the bean at
+  `DEFAULT_PHASE` (`Integer.MAX_VALUE`). Either way the stats logger is quiet first; the reason is
+  worth having right because it is the sort of comment that gets copied.
 * Neither `@Bean` uses `destroyMethod`. `@Bean` would otherwise infer `close()` on both
   `AutoCloseable`s, and destruction runs *after* the stop phases in reverse dependency order, not in
   phase order. One owner each: the lifecycle adapter.
@@ -72,6 +76,24 @@ out by hand and [`docs/03` section 8](../docs/03-artio-amps-bridge-design.md) ex
 `stop(Runnable)` runs `close()` synchronously and only then calls the callback — the callback
 releases the phase, so running it early would let the JVM proceed to exit with messages still in the
 ring buffer.
+
+### When the refresh fails
+
+A refresh that fails *after* the phases started — the engine failing to bind, or a
+`ContextRefreshedEvent` listener throwing — never runs a stop phase at all. Spring goes straight to
+destroying singletons, and the publisher's non-daemon agent thread would then hold the JVM open with
+no engine feeding it: an application that is neither running nor exiting.
+
+So **both adapters also implement `DisposableBean`**, with `destroy()` an idempotent `stop()`, and
+`artioRuntimeLifecycle` takes the publisher's adapter as a constructor parameter. That dependency
+edge is what orders the *destruction* path — engine first, publisher second — the same way the
+phases order the normal one. The result: the publisher is still drained and flushed, and the JVM
+exits non-zero instead of hanging. `ContextRefreshFailureTest` drives both failure paths against a
+real application, and `BootJarFailedStartIT` points the fat jar at a dead port and asserts it exits
+non-zero.
+
+The context is **not restartable**. Both runtimes refuse a second `start()`, so `stop()` followed by
+`start()` on a live context is rejected rather than half-working. Build a new context.
 
 ## Running the demo
 
@@ -169,7 +191,7 @@ same key.
 | `artio.port` | `9880` | bind port, or remote port |
 | `artio.sender-comp-id` | `ARTIO` | this engine's `SenderCompID(49)` |
 | `artio.target-comp-id` | `QFJ` | the counterparty's `TargetCompID(56)` |
-| `artio.fix-version` | `FIX.4.2` | `FIX.4.2` or `FIX.4.4` (`FIX42` / `FIX44` also accepted) |
+| `artio.fix-version` | `FIX.4.2` | four spellings, matched case-insensitively: `FIX.4.2`, `FIX42`, `FIX.4.4`, `FIX44`. **Not** the bare `4.2` that `bridge.properties` accepts for `artio.fixVersion` — copying that value across fails validation with the key named |
 | `artio.heartbeat-interval-sec` | `30` | `HeartBtInt(108)` proposed at logon |
 | `artio.base-directory` | *(blank)* | parent of the derived Aeron/archive/log dirs; blank means `java.io.tmpdir` |
 | `artio.reset-seq-nums-on-logon` | `true` | send `ResetSeqNumFlag(141)=Y` (initiator) |
@@ -178,6 +200,9 @@ same key.
 | `artio.reply-timeout-ms` | `10000` | Artio's engine/library reply timeout |
 | `artio.shutdown-timeout-ms` | `5000` | how long `close()` waits for a graceful FIX logout |
 | `artio.delete-directories-on-close` | `true` | delete the Aeron and Artio directories on shutdown |
+| `artio.reconnect-enabled` | `true` | **initiator only**: re-initiate after a disconnect. Nothing is attempted for an acceptor |
+| `artio.reconnect-initial-backoff-ms` | `1000` | first wait before re-initiating |
+| `artio.reconnect-max-backoff-ms` | `30000` | the ceiling the exponential back-off stops at |
 | `artio.log-messages` | `true` | compose a `LoggingSink` ahead of the publisher (allocates a `String` per message; a demo affordance) |
 
 ### `bridge.*` — AMPS
@@ -186,7 +211,7 @@ same key.
 | --- | --- | --- |
 | `bridge.enabled` | `true` | `false` leaves `AmpsFixPublisher` out of the context |
 | `bridge.uri` | `tcp://localhost:9007/amps/fix` | the AMPS URI. `/amps/fix` selects the server-side FIX parser — that is what makes `/11`-style SOW keys work |
-| `bridge.client-name` | `artio-bridge` | AMPS client name; a unique suffix is appended per connection |
+| `bridge.client-name` | `artio-bridge` | AMPS client name; a unique suffix is appended per connection, **unless** `bridge.guaranteed-publishing` is on, when the name is used verbatim so a returning publisher is recognised and its store replayed |
 | `bridge.default-topic` | `fix.raw` | every application message goes here; blank for none |
 | `bridge.admin-topic` | `fix.admin` | where session-level messages go when the next key is true |
 | `bridge.publish-admin-messages` | `false` | publish `Logon`, `Heartbeat`, … at all |
@@ -218,7 +243,7 @@ that lacks the topic's key and silently stores every such message under one shar
 `bridge.route` is **all-or-nothing**, exactly as in `BridgeMain`: define one rule and it replaces the
 whole set. Spring binds a collection from the single highest-precedence source that has any element
 of it, so an override file with two rules yields two rules — not two plus the five it did not
-mention. In YAML, quote a numeric message type:
+mention.
 
 ```yaml
 bridge:
@@ -226,10 +251,15 @@ bridge:
     - msg-type: D
       topic: fix.orders
       required-tag: 11
-    - msg-type: "8"          # unquoted this is the integer 8, and the binder will say so
+    - msg-type: "8"          # quoting is optional: an unquoted 8 binds as the string "8"
       topic: fix.execs
       required-tag: 17
 ```
+
+Quoting a numeric `msg-type` is a **readability choice, not a requirement**. YAML reads an unquoted
+`8` as an integer, but the target component is a `String`, and Spring's binder converts it — so
+`msg-type: 8` binds as `"8"` and the route works. The `custom-routes` test profile binds an unquoted
+one deliberately, so the claim cannot rot.
 
 ### One configuration, two entry points
 
@@ -300,8 +330,8 @@ with no default topic and no routes is refused.
 ## Tests
 
 ```bash
-./gradlew :artio-spring-boot:test              # 30 tests, ~3 s, no container, no Artio, no AMPS
-./gradlew :artio-spring-boot:integrationTest   # 2 tests, ~30 s, needs podman and the AMPS image
+./gradlew :artio-spring-boot:test              # 37 tests, ~3 s, no container, no Artio, no AMPS
+./gradlew :artio-spring-boot:integrationTest   # 3 tests, ~30 s, needs podman and the AMPS image
 ./gradlew :artio-spring-boot:build             # both (check depends on integrationTest)
 ```
 
@@ -310,9 +340,11 @@ key name; the shipped `bridge.properties` binding to exactly what `BridgeMain` b
 two lifecycle phases producing the required start and stop order under a real
 `DefaultLifecycleProcessor`; a real `AmpsFixPublisher` over the bridge's `InMemoryPublishPort` being
 started, closed and flushed by its adapter; the `FixMessageSink` ambiguity that `@Primary` resolves;
-the stats logger registering one task, or none at interval 0.
+the stats logger registering one task, or none at interval 0; the initiator reconnect keys reaching
+`FixEngineConfig`; and `ContextRefreshFailureTest`, which fails a refresh both ways and asserts the
+publisher was still drained.
 
-`integrationTest` — the whole flow twice, against a throwaway AMPS from
+`integrationTest` — the whole flow, against a throwaway AMPS from
 [`:amps-test-harness`](../amps-test-harness):
 
 * `SpringApplicationOrderFlowIT` runs a `SpringApplication` in the test JVM. Beyond the SOW
@@ -322,6 +354,9 @@ the stats logger registering one task, or none at interval 0.
   someone has to read.
 * `BootJarSubprocessIT` runs `bootJar`'s output as `java -jar` in another JVM, kills it with SIGTERM
   and asserts on what the dying process flushed and on the order its log says it did it in.
+* `BootJarFailedStartIT` runs the same fat jar pointed at a dead AMPS port and asserts it **exits
+  non-zero** rather than hanging on the publisher's non-daemon agent thread — the refresh-failure
+  path above, end to end.
 
 Both skip with a reason when podman or the AMPS image is missing (`AmpsAssumptions.assumeAvailable`),
 and `AMPS_IT=false` skips them outright.

@@ -2,9 +2,9 @@
 
 How `:artio-engine` puts an Artio FIX engine inside one process, what the sink contract is, and
 what had to be discovered to get FIX 4.2 working. Everything below was measured or observed on
-this machine (Corretto 21, Apple Silicon) on 2026-09-06 while the 27 integration tests in
-`artio-engine/src/integrationTest` were being written; where a number appears, it came from a run,
-not from a datasheet.
+this machine (Corretto 21, Apple Silicon) on 2026-09-06 while the integration tests in
+`artio-engine/src/integrationTest` were being written — 44 of them by the end of the review pass;
+where a number appears, it came from a run, not from a datasheet.
 
 Companion documents: `docs/00-implementation-plan.md` section 4.3 (the brief),
 `docs/02-quickfixj-to-artio-dictionary.md` (where the FIX 4.2 dictionary comes from).
@@ -136,11 +136,22 @@ ERROR - Archive.Context.archiveClientContext.controlResponseChannel must be set
 ### 2.3 Directories
 
 Each runtime creates `<baseDirectory>/artio-<runtimeId>/` holding `aeron/`, `archive/`, `logs/`,
-`engineCounters` and `libraryCounters`. `runtimeId` is
-`<name>-<mode>-<counter>`, so two runtimes in one JVM never collide even with the same `name`.
+`engineCounters` and `libraryCounters`. `runtimeId` is `<name>-<mode>-<pid>-<counter>`.
+
+The counter keeps two runtimes in one JVM apart; the **PID** keeps two *processes* apart, and that
+one is not cosmetic. Artio starts its media driver with `dirDeleteOnStart(true)`, so without the PID
+two JVMs that happen to share a `name` — parallel Gradle integration-test workers, or two instances
+of the same application on one host — would delete each other's **live** Aeron directory, which
+presents as an Aeron client timing out for no visible reason. `name` is a path component, so path
+separators in it are rejected at `build()`.
 
 `FixEngineConfig.aeronDirectory` and `logFileDir` override the derived paths when something outside
-the process needs to find them; leaving them null (the default) is the normal case.
+the process needs to find them; leaving them null (the default) is the normal case. An **explicit**
+directory is **never wiped on start**: the delete-on-start flags are forced off for it, because a
+directory the caller named may already hold something the caller wants, and only a derived directory
+is known to belong to this runtime. It still honours `deleteDirectoriesOnClose`, which defaults to
+true — set that false to keep it. Each of the two is decided on its own
+(`ArtioRuntimeTest.eachExplicitDirectoryIsDecidedOnItsOwn`).
 
 The integration suite puts `baseDirectory` under `java.io.tmpdir`, not `build/`: Aeron leaves a
 mapped file behind if a JVM is killed mid-test, and nothing that survives a crash should land inside
@@ -170,7 +181,10 @@ fails at `build()` with a message naming the field rather than inside Artio at s
 | `logonTimeoutMs` | 20 000 | how long `start()` waits for each start-up phase. |
 | `replyTimeoutMs` | 10 000 | Artio's engine/library reply timeout, and the send back-pressure deadline. |
 | `shutdownTimeoutMs` | 5 000 | how long `close()` waits for a graceful logout. |
-| `deleteDirectoriesOnClose` | true | delete `<base>/artio-<id>/` on close. |
+| `deleteDirectoriesOnClose` | true | delete `<base>/artio-<id>/` on close; also governs explicitly configured directories. |
+| `reconnectEnabled` | true | initiator only: re-initiate after a disconnect (section 5.1). |
+| `reconnectInitialBackoffMs` | 1 000 | initiator only: the first wait, doubled on each failure. |
+| `reconnectMaxBackoffMs` | 30 000 | initiator only: the ceiling that doubling stops at. |
 | `authenticationStrategy` | `AuthenticationStrategy.none()` | the acceptor's logon hook; the default accepts everyone. |
 
 `authenticationStrategy` is the extension point for CompID or credential checks. Note the FIX 4.2
@@ -243,7 +257,7 @@ initiator integration tests have nothing to wait for after `launch`.
 
 ## 5. Session lifecycle
 
-`SessionListener` has five callbacks, all invoked on the poll thread, all with no-op defaults:
+`SessionListener` has seven callbacks, all invoked on the poll thread, all with no-op defaults:
 
 | Callback | Fired when |
 | --- | --- |
@@ -252,6 +266,7 @@ initiator integration tests have nothing to wait for after `launch`.
 | `onLogout(SessionKey)` | an inbound `Logout(35=5)` was seen. |
 | `onDisconnect(SessionKey, reason)` | Artio's `SessionHandler.onDisconnect`; `reason` is the `DisconnectReason` name. |
 | `onTimeout(SessionKey)` | the library stopped polling for too long and the engine took the session back. |
+| `onReconnectAttempt(int attempt, long backoffMs)` | an initiator is about to re-initiate: which attempt this is, and how long it waited first. |
 | `onError(Throwable)` | any Aeron or Artio agent raised an error, or a sink threw. |
 
 Observed order for an Artio acceptor with a QuickFIX/J initiator (asserted in
@@ -260,6 +275,39 @@ Observed order for an Artio acceptor with a QuickFIX/J initiator (asserted in
 ```
 acquired:QFJ   →   logon:QFJ   →   ... application messages ...   →   disconnect:QFJ:...
 ```
+
+For an **initiator** whose counterparty goes away and comes back
+(`ArtioInitiatorReconnectIT`), the line continues rather than ending:
+
+```
+acquired   →   logon   →   ...   →   disconnect   →   reconnect:1:1000   →   acquired   →   logon
+```
+
+### 5.1 Initiator reconnect
+
+Artio does not re-initiate a session by itself, and the shape of the failure it leaves behind is
+unhelpful: `isRunning()` stays `true`, so the runtime looks healthy, while every `send` fails for
+the rest of the process's life. So `ArtioRuntime` owns a `Reconnector` that runs **on the poll
+thread** — the only thread allowed to touch the `FixLibrary` — and re-runs the same
+`library.initiate(...)` the initial start used, with exponential back-off from
+`reconnectInitialBackoffMs`, doubling to `reconnectMaxBackoffMs`. Each attempt is announced through
+`onReconnectAttempt(attempt, backoffMs)` before the wait, so a log or a metric sees the retry storm
+rather than silence.
+
+`isRunning()` still stays `true` throughout, and deliberately: it means "the runtime is alive", not
+"a session is up". **`isSessionActive()` is the health signal** to poll, alert on, or wire to a
+readiness probe.
+
+Nothing is attempted in three cases, all of them by design:
+
+* for an **acceptor** — there is nothing to initiate; the counterparty is the one that dials;
+* with `reconnectEnabled=false` — for a caller that wants to own the retry policy;
+* once `close()` has begun — reconnecting during shutdown would be a race with nothing to win.
+
+The matching start-up edge: an initiator's `start()` throws as soon as the session reaches
+`DISCONNECTED` or `DISABLED`, rather than waiting out `logonTimeoutMs`. A counterparty that refuses
+the logon answers within a round trip, and making the caller wait twenty seconds to be told so is
+just a slower way of saying the same thing (`ArtioInitiatorLogonFailureIT`).
 
 `SessionKey` is resolved once when the session is acquired, from Artio's `CompositeKey`, and is an
 immutable record a sink may keep. Its two CompIDs are named from **this engine's** point of view
@@ -365,6 +413,28 @@ Two consequences for callers:
 * `send` from *inside* a sink callback is legal and cheap — it is the same thread enqueueing to
   itself, drained later in the same `doWork`. `ArtioToArtioIT` replies to orders exactly this way.
 
+### 8.1 A send that cannot succeed fails the future
+
+Artio 0.168's `Session.trySend` **does not check the session state**, and `Pressure.isBackPressured`
+recognises only the two back-pressure codes (-2, -3). So `NOT_CONNECTED (-1)` and `CLOSED (-4)` came
+back through the naive path as ordinary negative positions and were reported to the caller as
+successful sends: "sent" while the session was logging out, "sent" after the venue had closed the
+socket. A gateway that reports a send it did not make is worse than one that refuses.
+
+`attemptSend` therefore fails the future when `session.state() != ACTIVE`, and again when the
+returned position is negative for any reason that is *not* back-pressure. Two parameterised
+integration tests hold the line: a send issued while the session is logging out, and a send after
+the venue closed.
+
+### 8.2 A send racing `close()` always completes
+
+The queue and the shutdown drain are a classic race: a command offered just after `onClose()` drained
+the queue would never be consumed, and its future would never complete — a caller blocked forever on
+`sendAndAwait`. `CommandQueue` carries a `volatile` stop flag which the producer re-checks **after**
+its `offer`; if the queue has stopped, the producer fails the command itself. An integration test
+runs four producer threads against a closing runtime and asserts every future completed, one way or
+the other. "Completed exceptionally" is an answer; "never completed" is not.
+
 `submit(Consumer<FixLibrary>)` is the escape hatch for anything this class does not wrap; it runs on
 the poll thread and completes its future when the action returns.
 
@@ -445,7 +515,15 @@ and safe on one whose `start()` failed part way through. The order matters:
 If start-up failed before the `AgentRunner` existed, step 2 closes the library directly instead.
 
 Every command still queued when the agent closes is failed with "is shutting down", so no caller is
-left holding a future that never completes.
+left holding a future that never completes (section 8.2).
+
+**`close()` must not be called from the poll thread.** Step 1 waits for the poll agent to make
+progress, so a sink or a `SessionListener` calling `close()` from inside its callback parks the poll
+thread on its own progress; `AgentRunner.close()` then self-joins, returns immediately, and steps 3
+and 4 shut the engine and the media driver down while the library is still open. The failure is
+quiet and the stack trace is unhelpful. `ArtioRuntime` keeps the poll thread's reference and throws
+`IllegalStateException` instead — the right thing for a sink that wants to stop everything is to
+signal another thread.
 
 `ArtioRuntimeShutdownIT.everyArtioAndAeronThreadTheRuntimeStartedIsGoneAfterCloseReturns` snapshots
 thread names before start, asserts that at least four new Artio/Aeron-looking threads appeared and
@@ -464,8 +542,11 @@ Measured on this machine, Corretto 21, Apple Silicon, loopback:
 | `ArtioRuntime.launch` for an acceptor (driver + archive + engine + library + bind) | ~0.30 s warm, 0.45 s for the first in a JVM |
 | Initiator logon latency: `library.initiate(...)` to `session.isActive()` | **10–28 ms**, typically 18–20 ms |
 | Threads per runtime | 9 |
-| Full `:artio-engine:integrationTest` (27 tests, 32 runtimes started and closed) | ~32 s |
-| `:quickfixj-counterparty:integrationTest` (8 tests) | ~15 s |
+| Full `:artio-engine:integrationTest`, 27 tests / 32 runtimes as measured | ~32 s |
+
+The suite has since grown to **44 integration tests across 7 classes** (and 54 unit tests) as the
+review pass added the reconnect, logon-failure, directory and shutdown-race cases; the ~32 s above
+is the measurement that was actually taken, not a rescaled guess.
 
 The logon latency is dominated by the TCP round trip plus one poll cycle of the `BackoffIdleStrategy`
 on each side; it is not a measure of Artio's message path, which is a different order of magnitude.

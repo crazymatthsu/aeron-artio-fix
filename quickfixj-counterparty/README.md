@@ -87,9 +87,24 @@ Every message sent or received is printed with SOH shown as `|`:
 ```
 
 The initiator exits 0 once the scenario has run and the replies have stopped arriving (or the
-10-second reply window expires — a counterparty that does not answer is not an error). The acceptor
-runs until Ctrl-C, and closes the engine **inside** the shutdown hook so the counterparty gets a
-`Logout` rather than a dropped socket.
+10-second reply window expires — a counterparty that does not answer is not an error). Against
+Artio it is normally `received 0 execution report(s) of an expected 8`: `:artio-engine` is a
+receiving gateway, not a matching engine, so nothing there answers a `35=D`. Point the initiator at
+`acceptor` mode on 9881 to see the eight replies.
+
+Both modes install the shutdown hook **before** `start()`, and both close the engine inside it, so
+Ctrl-C sends a `Logout` rather than dropping the socket — the acceptor waiting for Ctrl-C and the
+initiator waiting out its reply window alike. `QfjMainIT` proves it by running the hook.
+
+`QfjMain.run(String[], PrintStream out, PrintStream err)` returns the exit code and does all
+validation inside the usage path; only `main` calls `System.exit`. Exit codes: `0` ran,
+`1` (`EXIT_NO_LOGON`) an initiator never logged on, `2` (`EXIT_BAD_ARGUMENTS`) bad arguments, with
+the reason and the usage on `err`.
+
+Config validation used to sit *outside* the catch, so `--port 0`, `--port 70000`, `--heartbeat 0`
+and equal CompIDs printed a stack trace and the wrong code; `toConfig()` now runs inside it.
+`--port` also distinguishes its two failures: `--port -5` and `--port 70000` are *out of range*, a
+missing `--port` is *required*.
 
 ## The order scenario
 
@@ -112,11 +127,16 @@ observable rather than trivially true.
 Against `QfjAcceptor` it produces eight execution reports: an acknowledgement and a fill for each of
 the three orders, one `Replaced` and one `Canceled`.
 
+A `NewOrderSingle` that is **missing a required body tag** — `OrderQty(38)` is the one that bites,
+because `getDouble` throws `FieldNotFound` — is answered with a `BusinessMessageReject`
+(`35=j`, `380=5` *conditionally required field missing*) naming the tag. Silence would be worse: a
+counterparty that neither fills nor rejects looks identical to one that never received the order.
+
 ## Running the tests
 
 ```bash
-./gradlew :quickfixj-counterparty:test              # 51 unit tests, no sockets
-./gradlew :quickfixj-counterparty:integrationTest   # 8 tests: QuickFIX/J <-> QuickFIX/J on loopback
+./gradlew :quickfixj-counterparty:test              # 65 unit tests, no sockets
+./gradlew :quickfixj-counterparty:integrationTest   # 12 tests: QuickFIX/J <-> QuickFIX/J on loopback
 ./gradlew :quickfixj-counterparty:build             # both (check depends on integrationTest)
 ```
 
@@ -127,7 +147,9 @@ the three orders, one `Replaced` and one `Canceled`.
 * **Integration** (`QfjToQfjIT`, parameterised over both versions): the acceptor receives every
   scenario message with the right `ClOrdID`s; the initiator gets the eight execution reports with
   the right `ExecType`s and `OrderID` continuity; neither side emits a `Reject`, `BusinessMessageReject`
-  or `OrderCancelReject`; closing the initiator logs the session out at the acceptor.
+  or `OrderCancelReject`; an order missing `OrderQty` *does* come back as `35=j` `380=5`; closing the
+  initiator logs the session out at the acceptor. `QfjMainIT` runs the CLI's shutdown hook and
+  asserts the counterparty saw a `Logout`.
 
 Ports come from `new ServerSocket(0)`; none is hard-coded, and nothing is written to disk.
 

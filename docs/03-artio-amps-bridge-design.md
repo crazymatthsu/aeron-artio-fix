@@ -258,6 +258,24 @@ every stats line. Three things bound the damage:
   (`fix.raw`, `fix.orders`, `fix.execs` here). `PublishStore` (memory-mapped) or
   `HybridPublishStore` would survive a JVM death and are a one-line change in
   `AmpsClientConnection` if that is ever wanted.
+
+  **Two things have to be true for the replay to happen at all**, and both are properties of the
+  port rather than of the option:
+
+  * **One store, kept across reconnects.** `AmpsClientPort` owns a single `Store` for its lifetime
+    and hands *that instance* to every `Client` it builds. The obvious implementation — close the
+    client on disconnect, build a fresh one — throws the store away with it, so the option
+    reconnects promptly and replays nothing, which is strictly worse than not having it: the
+    counters say `reconnects=1 lost=0` and the messages are gone anyway.
+  * **A stable client name.** AMPS identifies a returning publisher **by name**, so the
+    `nanoTime`-suffixed name the port uses to keep two processes apart makes every reconnection a
+    stranger with no history to replay. When `guaranteedPublishing` is on, the configured
+    `clientName` is used **verbatim** — which also means it is the caller's job to make it unique
+    across processes.
+
+  The replay itself happens inside **`Client.logon`**, not on the next publish. A reconnect that
+  reaches logon has already resent what was outstanding; one that fails to log on has not, which is
+  why the reconnect back-off is what bounds the exposure.
 * **Artio's own message log** still holds every message that arrived. It is the durable upstream, and
   replaying it is the honest recovery story for a long outage.
 * **`fix.raw` is journalled**, so a message that a *routing rule* declined is still recoverable from
@@ -311,6 +329,22 @@ the whole timeout before step 2.3 did the work anyway.
 Closing the publisher first would leave Artio delivering into a stopped agent, and those messages
 would be counted as dropped. Flushing concurrently with either is not supported.
 
+**Steps 2.1 and 2.3 do not share a deadline.** They did originally, and the arithmetic was quietly
+lossy: a slow agent could consume the entire `flushTimeoutMs` in 2.1, leaving the caller-thread
+drain — the step that actually cannot be skipped, because after 2.2 nothing else will ever read the
+ring — with zero budget, at which point the remaining records were abandoned and logged as "not
+published". The final drain now gets **its own full `flushTimeoutMs`**. Shutdown can therefore take
+longer than `flushTimeoutMs`; that is the intended trade.
+
+A related edge in the same drain: Agrona's `RingBuffer.read` returns **0 after consuming a padding
+record** at the buffer tail, so "read returned nothing" is not "the ring is empty". A loop that
+breaks on `read == 0` abandons every record at index 0 onwards whenever the head happens to sit on
+padding. The drain breaks only when `read == 0` **and `size()` is unchanged**.
+
+**`start()` after `close()` throws `IllegalStateException`.** A publisher is not reusable: the
+second `start()` would launch an agent thread that no later `close()` stops, and the agent thread is
+non-daemon, so the JVM would never exit. Build a new `AmpsFixPublisher`.
+
 ### The shutdown-hook trap
 
 `BridgeMain` originally used the obvious idiom — a shutdown hook that counts down a latch the main
@@ -318,9 +352,18 @@ thread is waiting on — and it silently truncated the shutdown. **The JVM halts
 has returned**; it does not wait for a non-daemon thread that a hook happened to release. So
 `runtime.close()` and `publisher.close()` were racing the exit, and the messages still in the ring
 buffer were lost — exactly the failure the whole module exists to prevent, in the one code path
-where it is least visible. The fix is a second latch: the hook signals, then blocks (bounded, at
-`flushTimeoutMs + 5 s`) until the main thread says the clean-up is done. Observed before and after,
-on `kill -TERM`:
+where it is least visible. The fix is a second latch: the hook signals, then blocks — bounded — until
+the main thread says the clean-up is done.
+
+**The bound has to be derived, not guessed.** `flushTimeoutMs + 5 s` was the first attempt and it
+was too short by a factor of three: the worst case is the engine's graceful logout **plus** the ring
+drain **plus** the agent join **plus** the flush, about 30 s with the defaults. A hook that gives up
+early is the same bug in a politer form. `BridgeMain` computes `closeBudgetMs` from the engine's
+`shutdownTimeoutMs` plus the bridge's own budgets — twice `flushTimeoutMs`, because 2.1 and 2.3 each
+have one, plus the agent close timeout — so the bound moves when the timeouts do
+(`BridgeMainTest`).
+
+Observed before and after, on `kill -TERM`:
 
 ```
 before:  shutdown requested → (JVM exits)
@@ -367,7 +410,7 @@ Other timings, from the integration suite and the demo:
 | `AmpsFixPublisher.start()` (connect + logon + agent thread) | ~30 ms against a local container |
 | `close()` on an idle bridge (drain + `publishFlush` + disconnect) | 3–8 ms |
 | logon, five orders, and all ten publishes landed in AMPS | ~1 s wall clock, dominated by the QuickFIX/J logon round trip |
-| `:artio-amps-bridge:test` (66 tests) | ~4 s |
+| `:artio-amps-bridge:test`, 66 tests as measured (85 after the review pass) | ~4 s |
 | `:artio-amps-bridge:integrationTest` (4 tests, 2 containers) | ~35 s, of which ~7 s is starting AMPS twice |
 
 ---
@@ -402,6 +445,14 @@ in `dropped`. Those are different failures and are deliberately different counte
 purpose. `BridgeRoutingAgainstAmpsIT` proves the `Logon` arrives by holding a live subscription open
 across the session; `sowDump --topic fix.admin` will always print nothing.
 
+**10.6a `SowDump` is a diagnostic, and diagnostics need exit codes.** `SowDump.run(args, out, err)`
+returns `0` when the query ran, `1` when AMPS was unreachable or the query failed, and `2` for a
+usage error — an unknown flag, a missing topic, or a `--timeout-ms` that is not a number, which used
+to escape as a raw `NumberFormatException` and read like a bug in the tool. `--filter` applies to
+`--replay` as well as `--topic`; it was silently ignored on the replay path, which is the worst
+possible behaviour for a filter, since the output looks plausible. The Gradle `sowDump` task
+forwards `-Dbridge.*` from the Gradle JVM, so `-Dbridge.amps.uri=…` works without `--uri`.
+
 **10.7 `OneToOneRingBuffer` means exactly one producer.** One `FixLibrary`, one poll thread — true
 today by construction. Attaching one publisher to two runtimes would corrupt the buffer silently.
 `ManyToOneRingBuffer` is a one-line change if that ever happens, and it is not optional.
@@ -411,8 +462,15 @@ today by construction. Attaching one publisher to two runtimes would corrupt the
 drift apart, which is the only way a documented default stays true.
 
 **10.9 Routes are all-or-nothing in properties.** Defining `bridge.route[0]` replaces the entire
-default set, from index 0, stopping at the first gap. Merging would be friendlier and would make
-"I removed a rule" inexpressible.
+default set, from index 0. Merging would be friendlier and would make "I removed a rule"
+inexpressible.
+
+A **gap** is an error, not a stop signal. `fromProperties` scans every `bridge.route[` key and
+throws when one names an index beyond the contiguous run it parsed, so `route[0]` + `route[2]`
+fails loudly instead of silently configuring one rule and discarding the other — the same reasoning
+as all-or-nothing, applied one level down. A lone `route[0].requiredTag` with no `msgType`/`topic`
+is rejected for the same reason, and the integer keys are range-checked rather than `(int)`-cast,
+so a value past `Integer.MAX_VALUE` cannot wrap into a plausible-looking small number.
 
 **10.10 A shutdown hook does not hold the JVM open for anyone else.** See section 8. This is the one
 bug in this module that would have shipped invisibly.

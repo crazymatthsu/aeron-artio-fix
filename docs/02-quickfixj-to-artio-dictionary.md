@@ -271,17 +271,40 @@ break parser).
 ```
 
 Artio offers an escape hatch; the converter fixes the dictionary instead, because the
-escape hatch is documented as dangerous. It drops the **message's own** copy and keeps the
-component's, since a component is shared with other messages. One exception: a direct
-field that is the `Len`/`Length` partner of a direct DATA field in the same aggregate is
-never dropped, because removing it would trade this failure for the one in 3.11.
+escape hatch is documented as dangerous.
 
-The same pass also drops a field repeated twice directly in one aggregate — a message or a
-component — which produces the same error without the `Through Path` suffix:
+**The rule is a walk, not a comparison, and it has to be Artio's walk.** Artio's
+`DictionaryParser` visits a message's entries **in document order** and recurses into
+**both** groups and components, accumulating **one tag set for the whole message**; the
+second time a tag appears anywhere in that traversal, it throws. So a converter that only
+compares a message's direct fields against the tags reachable through its components
+answers a strictly smaller question, and three real shapes slip past it with **zero
+notes** — only for `ArtioDictionaryCheck` to reject the output a moment later, which is a
+worse experience than not converting at all:
 
-```
-Message: News Field : Symbol (55)
-```
+* a tag that is direct on the message and also inside one of its **groups**;
+* a tag reachable through **two different components** on the same message;
+* a tag reachable through a **component nested inside another component**.
+
+The converter therefore performs exactly that walk: entry order, recursing into groups and
+components, one tag set per message, and the **later** occurrence — whichever it is,
+direct field or not — is the one dropped, with a `ConversionNote` naming it. The same walk
+runs over each **component** in its own right, because a component that is
+self-inconsistent fails the same way wherever it is included.
+
+Two consequences of walking rather than comparing:
+
+* A field repeated twice **directly** in one aggregate is the same rule, not a special
+  case. Artio reports it with no `Through Path` suffix:
+
+  ```
+  Message: News Field : Symbol (55)
+  ```
+
+* The `Len`/`Length` partner that rule 3.11 inserts for a DATA field is **not** inserted
+  when the walk already reaches that tag through a component. Inserting it would create
+  the duplicate this rule exists to remove — trading 3.11's failure for 3.9's, in the same
+  pass, which is how a converter ends up oscillating.
 
 **Fires on the bundled files:** no.
 
@@ -436,6 +459,15 @@ conversion that can go wrong:
 * **A missing `type` attribute on `<fix>`.** Defaults to `FIX`.
 * **A missing `required` attribute.** Read as `N`, by Artio and by this reader.
 * **Nested groups.** Generate and compile fine at any depth QuickFIX/J produces.
+
+One near-miss in that list deserves its own line, because it is a *silent* change of
+meaning rather than a rejection. QuickFIX/J compares `required` **case-insensitively**, so
+`required="y"` means required — but a reader that tests for the literal `"Y"` sees "not
+required", the writer then emits `N`, and a required field has quietly become optional in
+a dictionary that parses, generates and compiles perfectly. `QuickFixDictionaryReader`
+reads it case-insensitively and the writer normalises to `Y`/`N`. It produces **no
+`ConversionNote`**: nothing about the dictionary's meaning changed, only its spelling, and
+a note for every `y` in a venue file would bury the notes that matter.
 
 ---
 
@@ -662,6 +694,23 @@ vs 974 for FIX 4.4. Neither number is wrong; they count different things.
 A FIXT/FIX 5.x pair needs `CodecGenerationTool`'s two-file argument
 (`<fixt-xml>;<app-xml>`) and `DictionaryParser.parse(in, fixtDictionary)`; neither is wired
 up yet.
+
+### 6.1 The CLI's exit codes
+
+`ConvertDictionary.run(String[] args)` **returns** the exit code; `main` is a wrapper that
+calls `System.exit` with it. That split is not decoration — a CLI that exits inside a test
+kills the Gradle test worker, so every CLI test in this module drives `run`.
+
+| Code | Means | Where the detail goes |
+| --- | --- | --- |
+| `0` | every pair converted; the notes are on stdout | stdout |
+| `1` (`EXIT_FAILED`) | the input could not be read, the conversion threw, or `ArtioDictionaryCheck` rejected the result | stderr, with **Artio's own message** verbatim, plus the stack trace through SLF4J |
+| `2` (`EXIT_BAD_ARGUMENTS`) | the arguments are not input/output pairs: none, or an odd number after `--batch` | stderr, followed by the two usage lines |
+
+The distinction between 1 and 2 is the one that matters in a build: a `2` is the caller's
+fault, a `1` is the dictionary's. `--batch` converts its pairs **in order and stops at the
+first failure**, so the pairs before the failing one have already been written — do not
+read a partially populated output directory as a success.
 
 ---
 

@@ -119,7 +119,7 @@ hand with `amps-server/scripts/amps.sh`:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `AMPS_IMAGE` | `localhost/amps-demo:5.3.5.135` | must exist locally; `podman image exists` is the check |
+| `AMPS_IMAGE` | `localhost/amps-demo:5.3.5.135` | must exist locally; `<engine> image inspect` is the check, run against the engine the chosen compose implementation drives |
 | `AMPS_PLATFORM` | `linux/amd64` | AMPS is x86_64 only |
 | `AMPS_BIN` | `/opt/amps/bin/ampServer` | |
 | `CONTAINER_ENGINE` | `podman` | |
@@ -138,8 +138,15 @@ setting those yourself has no effect.
 2. `CONTAINER_ENGINE` (default `podman`) is not on `PATH`.
 3. No usable compose implementation: `<engine> compose version` fails and
    neither `podman-compose` nor `docker compose` works.
-4. `podman image exists $AMPS_IMAGE` says no. There is no public AMPS server
-   image, so this is an ordinary state of a developer machine.
+4. `<engine> image inspect $AMPS_IMAGE` says the image is not known. There is no
+   public AMPS server image, so this is an ordinary state of a developer
+   machine. `image inspect` rather than `podman image exists` because the latter
+   is podman-only and would skip every run under `CONTAINER_ENGINE=docker`; the
+   engine is the one the compose rung that succeeded drives, not whatever
+   `CONTAINER_ENGINE` names. Only "not known" is a missing image — any **other**
+   engine failure (a stopped podman machine, a refused connection) is reported
+   verbatim as a check failure, so a broken machine does not masquerade as an
+   ordinary absent image.
 
 A skip is not a failure and `./gradlew build` stays green without AMPS. The
 corollary is that **a green build is not proof these ran** - look for
@@ -155,8 +162,17 @@ in `build.gradle.kts`.
 ```
 
 `test` covers `printable`, the skip rules against an injected environment (a
-JVM cannot set its own environment variables), readiness-marker counting, and
-repository-root discovery.
+JVM cannot set its own environment variables), readiness-marker counting,
+subprocess timeout handling (`ProcessCommandRunnerTest`), a failed `up -d`
+still running `down` (`AmpsComposeServerStartFailureTest`), engine selection
+(`AmpsComposeServerEngineTest`), and repository-root discovery.
+
+No `--add-opens` / `--add-exports` are set on this module's tasks, and none are
+needed: the harness drives subprocesses and the AMPS client, and touches
+neither Artio nor agrona. A **consumer's** `integrationTest` task usually does
+need [the three flags](../artio-engine/README.md#jvm-flags--all-three-mandatory),
+because it runs an engine alongside this harness — copy them with the rest of
+the block from `build.gradle.kts`.
 
 `integrationTest` has two classes:
 

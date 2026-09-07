@@ -48,14 +48,17 @@ dependencies {
 }
 
 /**
- * `:artio-amps-bridge` and `:quickfixj-counterparty` declare `runtimeOnly(slf4j-simple)` because
- * they have mains of their own. A `runtimeOnly` dependency of a project dependency IS on the
- * consumer's runtime classpath, so without this both slf4j-simple and Spring Boot's logback would
- * be present, SLF4J would pick one arbitrarily and print a "multiple bindings" warning, and half
- * the configuration in logback-spring.xml would silently do nothing.
+ * Belt and braces against a second SLF4J binding. `:artio-amps-bridge` used to declare
+ * `runtimeOnly(slf4j-simple)` for its own mains, and a `runtimeOnly` dependency of a project
+ * dependency IS on the consumer's runtime classpath; the bridge now keeps slf4j-simple in a
+ * `mainLogging` configuration that only its `run`/`sowDump` tasks see (review finding B7), so
+ * nothing leaks any more. The exclude stays so that a future `runtimeOnly` binding in any
+ * upstream module cannot put slf4j-simple next to Spring Boot's logback, where SLF4J would pick
+ * one arbitrarily, warn about "multiple bindings", and half of logback-spring.xml would silently
+ * do nothing.
  *
- * Verified with `./gradlew :artio-spring-boot:dependencies --configuration runtimeClasspath`:
- * without the exclude, `org.slf4j:slf4j-simple` appears via project :artio-amps-bridge.
+ * Verify with `./gradlew :artio-spring-boot:dependencies --configuration runtimeClasspath`: the
+ * only SLF4J artifacts must be slf4j-api and the jul/log4j bridges.
  */
 configurations.configureEach {
     exclude(group = "org.slf4j", module = "slf4j-simple")

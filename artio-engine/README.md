@@ -45,7 +45,7 @@ try (ArtioRuntime runtime = ArtioRuntime.launch(config, message ->
 | `FixMessageSink` | `void onMessage(FixMessageView)` — the seam. |
 | `FixMessageView` | Reusable zero-copy flyweight over Aeron's buffer. |
 | `SessionKey` | Immutable session identity; safe to keep. |
-| `SessionListener` | `onSessionAcquired` / `onLogon` / `onLogout` / `onDisconnect` / `onTimeout` / `onError`. |
+| `SessionListener` | `onSessionAcquired` / `onLogon` / `onLogout` / `onDisconnect` / `onTimeout` / `onError` / `onReconnectAttempt(int attempt, long backoffMs)`. |
 | `ArtioRuntime` | Starts everything, polls, sends, closes. |
 | `LoggingSink` / `CompositeSink` / `CountingSink` | Ready-made sinks. |
 
@@ -67,11 +67,23 @@ try (ArtioRuntime runtime = ArtioRuntime.launch(config, message ->
 | `replyTimeoutMs` | 10 000 | Artio reply timeout; also the send back-pressure deadline |
 | `shutdownTimeoutMs` | 5 000 | how long `close()` waits for a graceful logout |
 | `deleteDirectoriesOnClose` | true | remove the runtime's directories on close |
+| `reconnectEnabled` | true | initiator only: re-initiate after a disconnect |
+| `reconnectInitialBackoffMs` | 1 000 | first wait before re-initiating |
+| `reconnectMaxBackoffMs` | 30 000 | ceiling the exponential back-off stops at |
 | `authenticationStrategy` | accept everyone | the acceptor's logon hook |
 
 Every runtime gets its own Aeron directory, archive and Artio log directory under `baseDirectory`
-with a unique suffix, and deletes them on `close()`. Two runtimes can therefore share a JVM — which
-`ArtioToArtioIT` does.
+and deletes them on `close()`. The suffix — the `runtimeId` — is `<name>-<mode>-<pid>-<counter>`:
+the **PID** is in there because Artio starts its media driver with `dirDeleteOnStart(true)`, so
+without it two processes sharing a name (parallel Gradle integration tests, two instances of the
+same application) would wipe each other's live Aeron directories. `name` is a path component, so
+path separators in it are rejected at build time.
+
+An **explicitly configured** `aeronDirectory` or `logFileDir` is **never wiped on start** — the
+delete-on-start flags are forced off for it, because a directory you named may already hold
+something you want. It still honours `deleteDirectoriesOnClose` (default true), so set that to
+`false` to keep it. Each explicit directory is decided on its own. Two runtimes can share a JVM —
+which `ArtioToArtioIT` does — but they must not share an explicit Aeron directory.
 
 ## The sink contract
 
@@ -83,6 +95,8 @@ with a unique suffix, and deletes them on `close()`. Two runtimes can therefore 
   that library is served;
 * expect **admin messages too**: Artio delivers every inbound message, `Logon` and `Heartbeat`
   included. Filter with `isAdmin()`, which is a set lookup on a packed long and costs nothing.
+  (`new LoggingSink()` logs **application messages only**; `new LoggingSink(prefix, true)` includes
+  admin.)
 
 Only messages this engine **receives** reach the sink; what it sends does not.
 
@@ -94,6 +108,31 @@ back-pressure until `replyTimeoutMs`. **Do not modify the encoder until the futu
 is not copied. `sendAndAwait(encoder, timeout)` is the blocking convenience;
 `submit(Consumer<FixLibrary>)` is the escape hatch for anything else that must run on the poll
 thread.
+
+A send **fails** the future when the session is not `ACTIVE`. Artio 0.168's `Session.trySend` does
+not guard on state, and `Pressure.isBackPressured` only recognises the two back-pressure codes, so
+`NOT_CONNECTED (-1)` and `CLOSED (-4)` would otherwise be returned as successful positions:
+"sent" while logging out, or after the venue closed the socket. Any negative position that is not
+back-pressure fails the future too. A send racing `close()` always completes one way or the other —
+the command queue's stop flag is re-checked after the offer, so a command enqueued just as the poll
+thread drained cannot be left hanging.
+
+## Initiator reconnect
+
+After a disconnect an **initiator** re-initiates from the poll thread, with exponential back-off
+between `reconnectInitialBackoffMs` and `reconnectMaxBackoffMs`; every attempt is reported through
+`SessionListener.onReconnectAttempt(attempt, backoffMs)`. `isRunning()` stays `true` throughout —
+it says the runtime is alive, not that a session is — so **`isSessionActive()` is the health
+signal** to poll or alert on.
+
+Nothing is attempted for an **acceptor** (there is nothing to initiate: the counterparty
+reconnects), with `reconnectEnabled=false`, or once `close()` has begun.
+
+Two related edges: initiator `start()` fails fast the moment the session reaches `DISCONNECTED` or
+`DISABLED` rather than waiting out `logonTimeoutMs` — a counterparty that refuses the logon should
+not cost twenty seconds. And `close()` **must not be called from the poll thread**: a sink or
+listener calling it inside a callback would park the poll thread waiting on its own progress, so it
+throws `IllegalStateException` instead.
 
 ## JVM flags — all three, mandatory
 
@@ -114,8 +153,8 @@ them too.
 ## Running the tests
 
 ```bash
-./gradlew :artio-engine:test              # 42 unit tests: config, the flyweight, the sinks. No ports.
-./gradlew :artio-engine:integrationTest   # 27 integration tests: real engines on loopback
+./gradlew :artio-engine:test              # 54 unit tests: config, the flyweight, the sinks. No ports.
+./gradlew :artio-engine:integrationTest   # 44 integration tests: real engines on loopback
 ./gradlew :artio-engine:build             # both (check depends on integrationTest)
 ```
 
@@ -126,7 +165,10 @@ The integration suite is unconditional — nothing skips, nothing needs a contai
 | `ArtioAcceptorFromQuickfixjIT` | Artio acceptor ← QuickFIX/J initiator, FIX 4.2 and 4.4: logon, five orders with their `ClOrdID`s, the `Logon` arriving as an admin message, the lifecycle events, the full order scenario |
 | `ArtioInitiatorToQuickfixjIT` | Artio initiator → QuickFIX/J acceptor, both versions: logon with a measured latency, an order built with a generated encoder that QuickFIX/J validates and answers, ordering across three sends, and a send after close failing the future |
 | `ArtioToArtioIT` | two runtimes, two Aeron directories: an order one way and an execution report back; separate directories, both removed on close |
-| `ArtioRuntimeShutdownIT` | the counterparty gets a `Logout` not a reset (both directions), no Artio or Aeron thread survives `close()`, directories are removed, `close()` is idempotent, a failed start leaves nothing behind |
+| `ArtioRuntimeShutdownIT` | the counterparty gets a `Logout` not a reset (both directions), no Artio or Aeron thread survives `close()`, directories are removed, `close()` is idempotent, `close()` from the poll thread throws, a failed start leaves nothing behind, and four concurrent producers racing `close()` all get their futures completed |
+| `ArtioInitiatorReconnectIT` | an initiator whose venue goes away re-initiates with back-off, reports each attempt, and is logged on again when the venue returns; `reconnectEnabled=false` does nothing |
+| `ArtioInitiatorLogonFailureIT` | a rejected logon fails `start()` at once rather than after `logonTimeoutMs` |
+| `ArtioRuntimeDirectoriesIT` | an explicit log directory is not wiped on start, is removed on close, and survives close with `deleteDirectoriesOnClose=false`; a second runtime handed the same live Aeron directory fails fast and leaves the first alone; one left by a dead driver is reused, not refused |
 
 Aeron and Artio directories live under `java.io.tmpdir` and are deleted on close, so nothing is left
 in the repository. Override with `-Dartio.it.dir=/somewhere` to keep them for inspection.

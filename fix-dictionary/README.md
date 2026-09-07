@@ -15,7 +15,7 @@ motivated it, is in [`docs/02-quickfixj-to-artio-dictionary.md`](../docs/02-quic
 | --- | --- |
 | `src/main/resources/quickfixj/FIX42.xml`, `FIX44.xml` | QuickFIX/J's dictionaries, verbatim. Provenance and licence in `NOTICE.md` next to them. |
 | `FixDictionary` and friends | A record tree for a dictionary: root attributes, header, trailer, messages, components, fields, enum values, nested groups. |
-| `QuickFixDictionaryReader` | JDK DOM parse into that tree. No external XML library, DTDs and external entities disabled. |
+| `QuickFixDictionaryReader` | JDK DOM parse into that tree. No external XML library, DTDs and external entities disabled. `required` is read **case-insensitively** (`Y`, `y`, and anything else is "not required"), matching QuickFIX/J; the writer always emits `Y`/`N`, so a `required="y"` field stays required in the Artio output instead of quietly becoming optional. The normalisation is spelling only and produces no `ConversionNote`. |
 | `ArtioDictionaryConverter` | `convert(FixDictionary) -> ConversionResult`: the converted tree plus a `ConversionNote` per change (rule, element, before, after, why). |
 | `ArtioDictionaryWriter` | Renders the tree back to XML, deterministically, so converting twice gives byte-identical output. |
 | `ArtioDictionaryCheck` | Parses a candidate with **Artio's own** `DictionaryParser` and throws with Artio's reason if it is rejected. |
@@ -69,8 +69,20 @@ java -cp "fix-dictionary/build/classes/java/main:$(find ~/.gradle/caches -name '
 `ConvertDictionary --batch <in> <out> [<in> <out> ...]` converts several files in one JVM;
 that is the form `convertDictionaries` uses.
 
-Exit codes: `0` converted, `1` the input could not be read or Artio rejected the result
-(with the reason on stderr), `2` bad arguments.
+No `--add-opens` / `--add-exports` here, unlike every other module: this one parses XML and
+uses Artio's `DictionaryParser`, which allocates no `UnsafeBuffer` and starts no Aeron, so
+none of [the three flags](../artio-engine/README.md#jvm-flags--all-three-mandatory) applies.
+The build does not set them on `convertDictionaries` or `convertDictionary` either. Add them
+back the moment this module touches a generated codec.
+
+Exit codes: `0` converted, `1` (`EXIT_FAILED`) the input could not be read, the conversion threw or
+Artio rejected the result (with Artio's own reason on stderr), `2` (`EXIT_BAD_ARGUMENTS`) the
+arguments are not input/output pairs (usage on stderr).
+
+`main` is a thin wrapper over `ConvertDictionary.run(String[])`, which **returns** the exit code
+instead of calling `System.exit`. Tests drive `run` directly; only `main` exits, so a CLI failure
+can never kill a test worker. `--batch` stops at the first failure, so the pairs before it have
+already been written.
 
 ## Adding another dictionary
 
@@ -102,7 +114,7 @@ A FIXT/FIX 5.x pair needs the `CodecGenerationTool` two-file form
 ./gradlew :fix-dictionary:test
 ```
 
-66 tests, no external dependencies. They cover:
+81 tests, no external dependencies. They cover:
 
 * both bundled dictionaries parse, with their message/component/field counts;
 * every message, component and field survives conversion, in order;

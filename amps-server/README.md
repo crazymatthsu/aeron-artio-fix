@@ -121,6 +121,11 @@ touching a container.
 | `AMPS_COMPOSE_PROJECT` | `artio-amps` | compose project name |
 | `AMPS_WAIT_TIMEOUT` | `120` | seconds `wait` will block; emulation makes a first start slow |
 
+All three ports are published on **`127.0.0.1` only**. `docker-compose.yml`
+writes them as `127.0.0.1:${AMPS_PORT}:9007` and so on, so a demo AMPS with no
+authentication is not reachable from the network the laptop is on. Change the
+compose file if you genuinely need a remote client.
+
 ## Tests
 
 ```bash
@@ -128,10 +133,19 @@ touching a container.
 ```
 
 `checkConfigXml` parses every `config/flows/*/amps-config.xml` and, before
-that, scans for a `--` inside an XML comment. XML forbids it and AMPS refuses
-the config for it, and these files are three-quarters explanatory prose, so it
-is the mistake they are most prone to. The scan runs first because the XML
-parser's own message for it names no line.
+that, scans for two things a comment must not contain:
+
+* a `--` inside an XML comment. XML forbids it and AMPS refuses the config for
+  it, and these files are three-quarters explanatory prose, so it is the
+  mistake they are most prone to. The scan runs first because the XML parser's
+  own message for it names no line.
+* the startup log line `AMPS initialization completed`, anywhere in the file.
+  AMPS echoes its whole config into its own log at startup, comments included,
+  about a second *before* it is listening — so a comment quoting the readiness
+  marker makes every reader watching for that phrase declare the server ready
+  while it is still starting. A config that mentions it is rejected here rather
+  than debugged later; see [`../docs/05-integration-testing-and-demo.md`](../docs/05-integration-testing-and-demo.md)
+  section 3.
 
 ## Integration tests do not use this instance
 

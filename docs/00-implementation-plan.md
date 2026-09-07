@@ -198,7 +198,9 @@ Purpose: the AMPS instance for this project, started with podman compose.
 * `docker-compose.yml` modelled on amps-demo's: image `${AMPS_IMAGE}`,
   platform `${AMPS_PLATFORM:-linux/amd64}`, ports `${AMPS_PORT:-9007}`,
   `${AMPS_WS_PORT:-9008}`, `${AMPS_ADMIN_PORT:-8085}`, config and data
-  bind-mounts from env, `restart: "no"`.
+  bind-mounts from env, `restart: "no"`. **As built:** all three ports are
+  published on `127.0.0.1` only — an unauthenticated demo server should not be
+  reachable from the network the laptop is on.
 * Flow `config/flows/artio-fix/amps-config.xml` (comments explain each
   topic):
   * `fix.raw` -- every application message, plain pub/sub, **journalled**
@@ -220,8 +222,13 @@ Purpose: the AMPS instance for this project, started with podman compose.
 * `Containerfile` and `vendor/README.md` copied from amps-demo so the image
   can be rebuilt here from a tarball; the tarball itself is gitignored.
   Document in the README that the default is to reuse amps-demo's image.
-* No Java code. A Gradle `check` task validates `amps-config.xml` is
-  well-formed XML and contains no `--` inside comments (AMPS rejects that).
+* No Java code. A Gradle `check` task (`checkConfigXml`) validates
+  `amps-config.xml` is well-formed XML, contains no `--` inside comments (AMPS
+  rejects that), **and does not mention the startup log line `AMPS
+  initialization completed` anywhere** — AMPS echoes its whole config into its
+  own log at startup, so a comment quoting the readiness marker makes every
+  reader watching for that phrase declare the server ready about a second
+  before it is listening (see `docs/05` section 3).
 
 ### 4.6 amps-test-harness
 
@@ -229,8 +236,15 @@ Purpose: give every integration suite a throwaway AMPS, started with podman
 compose, skipped cleanly when it cannot run.
 
 * `AmpsComposeServer implements AutoCloseable` with static
-  `unavailableReason()` (podman missing, `podman compose` missing, image
-  absent per `podman image exists`, or `AMPS_IT=false`) and `start(flow)`.
+  `unavailableReason()` (podman missing, `podman compose` missing, image not
+  known per **`<engine> image inspect`**, or `AMPS_IT=false`) and `start(flow)`.
+  **As built:** `image inspect`, not `podman image exists` — the latter is
+  podman-only and would skip every run under `CONTAINER_ENGINE=docker` — run
+  against the engine belonging to the compose rung that actually succeeded, not
+  whatever `CONTAINER_ENGINE` names, so `logs`/`ps`/`restart` cannot end up
+  talking to a different engine than `up`. Only "not known" means a missing
+  image; any other engine failure (a stopped podman machine) is reported
+  verbatim as a check failure.
   Each start picks three free host ports and a unique compose project name
   `artio-amps-it-<port>`, sets `AMPS_CONFIG_VOLUME` and `AMPS_DATA_VOLUME`
   (data under `build/amps-it/<project>/`), runs `up -d`, waits for the port
@@ -347,19 +361,23 @@ analysis the TODO asks for.
 
 ## 6. Phases and sub-agent assignment
 
-| Phase | Agent | Modules | Documents | Depends on |
-| --- | --- | --- | --- | --- |
-| 0 | orchestrator | skeleton: root Gradle files, version catalog, wrapper, `.gitignore`, empty module stubs | `docs/00` (this) | -- |
-| 1a | A | `fix-dictionary`, `fix-codecs` | `docs/02-quickfixj-to-artio-dictionary.md` | 0 |
-| 1b | B | `amps-server`, `amps-test-harness` | `docs/05-integration-testing-and-demo.md` (harness half) | 0 |
-| 2 | C | `artio-engine`, `quickfixj-counterparty` | `docs/01-artio-engine-design.md` | 1a |
-| 3 | D | `artio-amps-bridge` | `docs/03-artio-amps-bridge-design.md` | 1b, 2 |
-| 4 | E | `artio-spring-boot` | `docs/04-spring-boot-feasibility.md` | 3 |
-| 5 | F | root `README.md` with architecture diagram, module READMEs review, `docs/05` runbook half | -- | 4 |
-| 6 | orchestrator (Fable) | code review of every module (correctness, allocation on the hot path, shutdown ordering, test quality), fixes, then full `./gradlew build` and every `integrationTest` with AMPS up; commit | review notes appended to `docs/05` | 5 |
+**All phases are complete.** Outcome per phase:
 
-Phases 1a and 1b run in parallel (disjoint files). Phase 2 starts as soon
-as 1a is done, even if 1b is still running.
+| Phase | Agent | Modules | Documents | Outcome |
+| --- | --- | --- | --- | --- |
+| 0 | orchestrator | skeleton: root Gradle files, version catalog, wrapper, `.gitignore`, empty module stubs | `docs/00` (this) | done: Gradle 8.14.3 wrapper, Java 21 toolchain pinned to Corretto 21, eight modules |
+| 1a | A | `fix-dictionary`, `fix-codecs` | `docs/02-quickfixj-to-artio-dictionary.md` | done: QuickFIX/J's stock FIX42/FIX44 convert with **one** change between them (a `UTCDATE` alias), and both generate and compile |
+| 1b | B | `amps-server`, `amps-test-harness` | `docs/05-integration-testing-and-demo.md` (harness half) | done: compose-driven throwaway AMPS with clean skip rules, and the keyless-SOW correction to section 2 that the bridge depends on |
+| 2 | C | `artio-engine`, `quickfixj-counterparty` | `docs/01-artio-engine-design.md` | done: acceptor and initiator on both versions, zero-copy sink, plus the third JVM flag (`sun.nio.ch`) that only a `FixEngine` needs |
+| 3 | D | `artio-amps-bridge` | `docs/03-artio-amps-bridge-design.md` | done: off-heap ring buffer hand-off, tag-guarded topic routing, `run` and `sowDump` mains; nothing allocates per message |
+| 4 | E | `artio-spring-boot` | `docs/04-spring-boot-feasibility.md` | done, and the answer is yes: two `SmartLifecycle` phases give the required start/stop order, the fat jar runs, Spring owns no thread on the message path |
+| 5 | F | root `README.md` with architecture diagram, module READMEs review, `docs/05` runbook half | -- | done: root README with the architecture diagram, every module README reconciled with the code, the demo runbook run for real (section 9 of `docs/05`) |
+| 6 | orchestrator (Fable) | code review of every module (correctness, allocation on the hot path, shutdown ordering, test quality), fixes, then full `./gradlew build` and every `integrationTest` with AMPS up; commit | `docs/06-code-review.md` | done: 54 findings across the five module reviews, every one fixed, test-added or explicitly `wontfix` with a reason; full build and every `integrationTest` green with AMPS up |
+
+Phases 1a and 1b ran in parallel (disjoint files); phase 2 started as soon as
+1a was done. The review record lives in
+[`06-code-review.md`](06-code-review.md), not appended to `docs/05` as
+originally planned — it is a per-module table, and `docs/05` is a runbook.
 
 ## 7. Documents
 
@@ -372,15 +390,22 @@ as 1a is done, even if 1b is still running.
 | `docs/03-artio-amps-bridge-design.md` | the hand-off design (ring buffer, publisher agent, overflow policy), topic routing and the AMPS topic/SOW design, the guaranteed-delivery option, measured throughput if time allows |
 | `docs/04-spring-boot-feasibility.md` | the feasibility analysis with the answer, constraints, and the wiring used |
 | `docs/05-integration-testing-and-demo.md` | how podman compose is driven, the skip rules, the end-to-end demo runbook and how to verify each step |
+| `docs/06-code-review.md` | the phase-6 review record: every finding, where it was, and how it was resolved |
 
 ## 8. Demo (end state)
 
 ```bash
-./amps-server/scripts/amps.sh start                     # AMPS in podman, artio-fix flow
+amps-server/scripts/amps.sh start                       # AMPS in podman, artio-fix flow
 ./gradlew :artio-spring-boot:bootRun                    # Artio acceptor on 9880 + AMPS bridge
-./gradlew :quickfixj-counterparty:run --args="initiator --port 9880 --version FIX.4.2 --scenario orders"
+./gradlew :quickfixj-counterparty:run --args="initiator --host localhost --port 9880 --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
 ./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"   # records keyed by ClOrdID
 ```
 
 The same flow without Spring: `./gradlew :artio-amps-bridge:run` in place
 of `bootRun`.
+
+**As run.** The full runbook, with the real output of every step and the two
+results that surprise people (five SOW records for three orders; zero execution
+reports, because an Artio gateway is not a matching engine), is
+[`05-integration-testing-and-demo.md`](05-integration-testing-and-demo.md)
+section 9, and summarised in the root [`README.md`](../README.md).

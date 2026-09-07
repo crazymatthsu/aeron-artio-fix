@@ -96,7 +96,8 @@ signal, and it is expected.
 ```
 --topic <topic>     query the SOW: one record per key, as it stands now
 --replay <topic>    replay the transaction log from the epoch, and count it
---filter "<expr>"   an AMPS content filter over FIX tags, e.g. "/11 = 'ORD-1'"
+--filter "<expr>"   an AMPS content filter over FIX tags, e.g. "/11 = 'ORD-1'".
+                    Applies to --replay as well as --topic
 --uri <uri>         default tcp://localhost:9007/amps/fix
 --timeout-ms <ms>   idle time that ends a query (default 3000)
 ```
@@ -104,6 +105,18 @@ signal, and it is expected.
 `fix.raw` and `fix.admin` have no SOW declaration, so `--topic` finds nothing there by design; use
 `--replay fix.raw` for the tape. `fix.admin` is not journalled either — to see it you have to be
 subscribed while it happens.
+
+The Gradle task forwards `-Dbridge.*` from the Gradle JVM, so the URI can come from a property
+instead of a flag:
+
+```bash
+./gradlew :artio-amps-bridge:sowDump -Dbridge.amps.uri=tcp://host:9007/amps/fix --args="--topic fix.orders"
+```
+
+Exit codes, from `SowDump.run(String[], PrintStream, PrintStream)` — `main` is the only thing that
+calls `System.exit`: `0` the query ran, `1` AMPS was unreachable or the query failed, `2` a usage
+error (an unknown flag, no topic, or a `--timeout-ms` that is not a number — the last used to escape
+as a raw `NumberFormatException`).
 
 ## `bridge.properties`
 
@@ -131,7 +144,7 @@ Gradle JVM, as amps-demo's `bootRun` does:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `bridge.amps.uri` | `tcp://localhost:9007/amps/fix` | **the `/amps/fix` path is not decoration** — it selects the server-side FIX parser, which is what makes `/11`-style SOW keys work. `/amps/json` connects and then parses nothing |
-| `bridge.amps.clientName` | `artio-bridge` | a unique suffix is appended per connection |
+| `bridge.amps.clientName` | `artio-bridge` | a unique suffix is appended per connection — **unless** `guaranteedPublishing` is on, when the name is used verbatim and stays stable across reconnects |
 | `bridge.amps.guaranteedPublishing` | `false` | install a client-side publish store; see below |
 | `bridge.defaultTopic` | `fix.raw` | every application message, unconditionally. Blank means none |
 | `bridge.adminTopic` | `fix.admin` | where session-level messages go when the next key is true |
@@ -159,6 +172,25 @@ buy: durability across a crash of this process — the store is in memory — an
 topics AMPS journals (`fix.raw`, `fix.orders`, `fix.execs` in this flow). Turn it on when the AMPS
 stream is a system of record and a broker restart is likelier than a gateway one.
 
+Two things have to be true for the replay to happen at all, and both are the port's job rather than
+the caller's. `AmpsClientPort` keeps **one** `Store` for its lifetime and hands the same instance to
+every `Client` it builds, so a reconnect does not throw the unacknowledged messages away with the
+old client; and it uses the configured `clientName` **verbatim**, because AMPS matches a returning
+publisher by name and a `nanoTime`-suffixed one is a stranger every time. The replay itself happens
+inside `Client.logon`, not on the next publish — so a reconnect that logs on has already resent
+what was outstanding.
+
+**`start()` after `close()` throws `IllegalStateException`.** A publisher is not reusable: a second
+`start()` would launch an agent thread that no later `close()` stops, and a non-daemon agent thread
+keeps the JVM alive forever. Build a new `AmpsFixPublisher`.
+
+`close()` does three things — stop the agent, drain what is left on the caller thread, flush AMPS —
+and the **caller-thread drain gets its own `flushTimeoutMs` budget** rather than sharing one
+deadline with the earlier steps, so a slow agent shutdown cannot leave it with zero time and abandon
+messages that are sitting in the ring. `BridgeMain`'s shutdown hook waits a `closeBudgetMs` derived
+from the engine's shutdown timeout plus the bridge's own budgets, which is why Ctrl-C can take
+tens of seconds against an unresponsive AMPS instead of cutting the drain short.
+
 ## JVM flags — all three, mandatory
 
 ```
@@ -177,7 +209,7 @@ on the `application` start script. Any process that embeds `AmpsFixPublisher` ne
 ## Tests
 
 ```bash
-./gradlew :artio-amps-bridge:test              # 66 unit tests. No AMPS, no Artio, no sockets.
+./gradlew :artio-amps-bridge:test              # 85 unit tests. No AMPS, no Artio, no sockets.
 ./gradlew :artio-amps-bridge:integrationTest   # 4 tests against a real AMPS in podman
 ./gradlew :artio-amps-bridge:build             # both (check depends on integrationTest)
 ./gradlew :artio-amps-bridge:publishBenchmark  # a non-asserting throughput measurement
@@ -189,7 +221,9 @@ on the `application` start script. Any process that embeds `AmpsFixPublisher` ne
 | `TopicRouterTest` | the default routes, rule order, the tag guard, admin drop versus publish, and that a topic name is encoded once into a `byte[]` and reused |
 | `AmpsFixPublisherTest` | the ring-buffer hand-off against `InMemoryPublishPort`: bytes and offsets, flyweight reuse, both overflow policies, publish errors, the shutdown drain, the stats snapshot |
 | `BridgeConfigTest` | every property key, every validation rule, and that the shipped `bridge.properties` still parses into the built-in defaults |
-| `AmpsClientPortTest` | reconnect: back-off doubling to its ceiling, one connect per interval rather than per message, a non-disconnect failure staying an error, close |
+| `AmpsClientPortTest` | reconnect: back-off doubling to its ceiling, one connect per interval rather than per message, a non-disconnect failure staying an error, one `Store` reused across clients, a stable name when the store is on, a disconnect first noticed in `flush()` counted as a reconnect, close |
+| `SowDumpTest` | the CLI's exit codes and argument handling, including `--filter` reaching `--replay` |
+| `BridgeMainTest` | the shutdown-hook budget derived from the engine and bridge timeouts |
 | `BridgeOrderFlowIT` | the whole path on FIX 4.2 **and** 4.4: QuickFIX/J → Artio → ring buffer → AMPS, one SOW record per `ClOrdID`, five on the journal, `fix.execs` and `fix.order.state` empty, every counter |
 | `BridgeRoutingAgainstAmpsIT` | the `Logon` on `fix.admin` (seen through a live subscription, because the topic has no SOW and no journal), and a `35=8` with no tag 37 reaching `fix.execs` and the tape but **not** `fix.order.state` |
 
@@ -251,3 +285,9 @@ delivering into a stopped agent. Never flush concurrently with either.
 
 `new AmpsFixPublisher(config, port)` takes an `AmpsPublishPort` for tests — and does **not** close a
 port it was handed.
+
+**No SLF4J binding comes with this module.** It is a `java-library`, so a binding on its runtime
+classpath would arrive uninvited in every consumer — and Spring Boot, which brings Logback, would
+get two. `slf4j-simple` lives in a `mainLogging` configuration added only to the `run` and `sowDump`
+task classpaths. Embedding the bridge means choosing your own binding; without one, SLF4J prints its
+"no providers" notice and stays silent.

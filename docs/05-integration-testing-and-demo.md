@@ -5,8 +5,8 @@ the way it is, and what went wrong on the way there. Written from what was
 actually run on 2026-09-06 against podman 5.8.2 / podman-compose 1.6.0 and
 `localhost/amps-demo:5.3.5.135` on Apple Silicon.
 
-The demo runbook is the second half of this document and is filled in at
-phase 5.
+The demo runbook is the second half of this document (section 9). It was run
+end to end on 2026-09-07 and every block of output in it is real.
 
 ## 1. One AMPS, two callers
 
@@ -40,7 +40,12 @@ container log read separately with `podman logs <container>`.
 
 Fallback order when `podman compose version` fails: standalone
 `podman-compose`, then `docker compose`. Both the script and the harness
-implement the same ladder.
+implement the same ladder — and both then derive **the engine** from the rung
+that succeeded, not from `CONTAINER_ENGINE`. Without that, a machine whose
+podman compose shim is broken falls back to `docker compose` for `up` while
+`logs`, `ps` and `restart` keep asking podman, which reports nothing at all and
+looks exactly like a container that never started. The engine and the compose
+command are one decision, made once.
 
 The compose file path is always absolute, in both callers. `amps.sh` derives it
 from `${BASH_SOURCE[0]}` and the harness from the repository root, so neither
@@ -106,6 +111,12 @@ message code**:
 00-0015 AMPS initialization completed
 ```
 
+And because that is a trap a future config comment could re-open in one
+sentence, `:amps-server:checkConfigXml` **rejects any flow config that mentions
+`AMPS initialization completed` at all**, comment or not. The build refuses the
+config rather than leaving someone to debug a readiness check that fires a
+second early.
+
 Two further consequences, both learned by watching a wait loop time out on a
 server that had been up for two minutes:
 
@@ -136,7 +147,7 @@ the common cause, and the reason is in the log.
 empty data directory, 20MB of journal preallocated - reaches ready in about
 **3-4 seconds** wall clock; the server itself reports `(1 seconds)`. The
 harness allows three minutes anyway, because the first pull or a cold VM is a
-different animal. The whole seven-test integration suite, container start and
+different animal. The whole eleven-test integration suite, container start and
 one restart included, runs in about **16 seconds**.
 
 ## 4. Isolation
@@ -158,6 +169,10 @@ in the same Gradle run.
   permissions problem.
 * **`:z` on bind mounts only on Linux.** SELinux hosts need the label; podman's
   macOS VM rejects it on a virtiofs mount.
+* **Every port published on `127.0.0.1` only** — `127.0.0.1:${AMPS_PORT}:9007`
+  and so on in the compose file. Isolation from the network, not just from
+  other suites: an AMPS instance in this project has no authentication, and a
+  hand-started one on a laptop in a coffee shop should not be a service.
 
 ## 5. Skip rules
 
@@ -172,7 +187,16 @@ release tarball - so "no image" is an ordinary state of a developer machine.
 2. **`CONTAINER_ENGINE`** (default `podman`) is not on `PATH`.
 3. **No usable compose implementation**: `<engine> compose version` fails and
    neither `podman-compose` nor `docker compose` works.
-4. **`podman image exists $AMPS_IMAGE`** says no.
+4. **`<engine> image inspect $AMPS_IMAGE`** says the image is not known.
+
+   `image inspect`, not `podman image exists`: the latter is a podman-only
+   verb, so under `CONTAINER_ENGINE=docker` it fails on every machine and the
+   whole suite skips for the wrong reason. `<engine>` is the engine of the
+   compose rung that succeeded above. And only "not known" counts as a missing
+   image — every **other** engine failure (a stopped podman machine exiting
+   125, a refused socket) is reported verbatim as a check failure, because
+   "there is no image here" and "the container engine is broken" want different
+   things done about them.
 
 `AmpsAssumptions.assumeAvailable()` turns that into a JUnit 5 assumption with
 the reason as the skip message, which is why `amps-test-harness` puts JUnit on
@@ -214,7 +238,7 @@ result and the next run *with* one restores it:
 ```
 > Task :amps-test-harness:integrationTest FROM-CACHE
 BUILD SUCCESSFUL
-...7 tests, 7 skipped
+...11 tests, 11 skipped
 ```
 
 A green build that ran nothing, which is the worst available outcome for a
@@ -300,4 +324,260 @@ literally and the warning is noise. Do not rename the topics to silence it -
 they are the names the plan, the bridge and every consumer use. `<Pattern>`,
 unlike `<Name>`, really is a regex.
 
-## Demo runbook (filled in phase 5)
+## 9. Demo runbook
+
+Six commands, from the repository root, **one process at a time**. Everything
+below is the real output of a run on 2026-09-07 (podman 5.8.2,
+`localhost/amps-demo:5.3.5.135`, Corretto/Temurin 21 on Apple Silicon), trimmed
+to the interesting lines. SOH is shown as `|`.
+
+Prerequisite: the AMPS image exists locally. There is no public one — build it
+from a 60East release tarball with `amps-server/Containerfile`, or reuse the
+sibling `amps-demo` project's `localhost/amps-demo:5.3.5.135`, which is the
+default.
+
+### 1. AMPS
+
+```bash
+amps-server/scripts/amps.sh start
+```
+
+```
+starting artio-amps
+  flow:   artio-fix  (…/amps-server/config/flows/artio-fix/amps-config.xml)
+  image:  localhost/amps-demo:5.3.5.135  (linux/amd64)
+  ports:  9007 tcp / 9008 ws / 8085 admin
+  data:   …/amps-server/data/artio-fix
+>>>> Executing external compose provider "/usr/local/bin/podman-compose". …
+waiting for AMPS on port 9007 .. ready
+  admin:  http://localhost:8085/
+  client: tcp://127.0.0.1:9007/amps/fix
+```
+
+The compose-provider banner on stderr is noise, not a diagnostic (section 2).
+`ready` means the `00-0015 AMPS initialization completed` line appeared in the
+container log, not merely that the port answers. About 4 seconds here.
+
+The **admin UI** is now at <http://localhost:8085/> — topic counts, SOW sizes,
+and an SQL console over the websocket transport. Useful as a second opinion on
+everything `sowDump` prints.
+
+### 2. The engine and the bridge
+
+```bash
+./gradlew :artio-spring-boot:bootRun
+```
+
+Wait for the acceptor-bound line — steps 3 to 5 need it:
+
+```
+INFO  AmpsClientConnection      connected to AMPS at tcp://localhost:9007/amps/fix as artio-bridge-1498374805331791
+INFO  AmpsFixPublisher          bridge publishing to tcp://localhost:9007/amps/fix via [* -> fix.raw,
+                                35=D -> fix.orders requires 11, 35=G -> fix.orders requires 11,
+                                35=F -> fix.orders requires 11, 35=8 -> fix.execs requires 17,
+                                35=8 -> fix.order.state requires 37]; ring buffer 4194304 bytes, overflow DROP_AND_COUNT
+INFO  BridgePublisherLifecycle  amps publisher started: tcp://localhost:9007/amps/fix -> […]
+INFO  ArtioRuntime              bridge-acceptor-52239-1 started: mode=ACCEPTOR FIX.4.2 0.0.0.0:9880 ARTIO->QFJ
+                                dir=/var/folders/…/T/artio-bridge-acceptor-52239-1
+INFO  ArtioRuntimeLifecycle     artio runtime started: acceptor listening bridge-acceptor-52239-1 FIX.4.2 on 0.0.0.0:9880 as ARTIO->QFJ
+INFO  ArtioBridgeApplication    Started ArtioBridgeApplication in 0.891 seconds (process running for 0.995)
+INFO  StatsLogger               stats logging every 5000ms
+```
+
+Publisher first, engine second — that is the lifecycle ordering doing its job
+(`docs/04`). `bridge-acceptor-**52239**-1` is the runtime id: name, mode, **PID**,
+counter. The PID is there so two processes with the same name cannot delete
+each other's live Aeron directory.
+
+Then every five seconds, until a counterparty arrives:
+
+```
+INFO  StatsLogger  stats: accepted=0 published=0 pending=0 dropped=0 unroutable=0 errors=0 lost=0
+                    bytes=0 ring=0/4194304 connected [fix.raw={published=0}, …]
+INFO  StatsLogger  sessions: none logged on
+```
+
+**Plain-Java alternative.** `./gradlew :artio-amps-bridge:run` is the same
+engine, the same publisher, the same threads, configured from
+`artio-amps-bridge/bridge.properties` instead of `application.yml` and with a
+hand-written shutdown hook instead of Spring's phases. Every later step is
+identical. Use it to see that nothing on the message path is Spring's.
+
+### 3. The other FIX engine
+
+In a second terminal:
+
+```bash
+./gradlew :quickfixj-counterparty:run --args="initiator --host localhost --port 9880 \
+    --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
+```
+
+```
+-> 8=FIX.4.2|9=69|35=A|34=1|49=QFJ|52=20260907-20:07:14.105|56=ARTIO|98=0|108=10|141=Y|10=140|
+<- 8=FIX.4.2|9=69|35=A|34=1|49=ARTIO|52=20260907-20:07:14.142|56=QFJ|98=0|108=10|141=Y|10=141|
+== logon FIX.4.2:QFJ->ARTIO
+-> 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|…|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=106|
+-> 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|…|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=070|
+-> 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|…|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=121|
+-> 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|…|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=141|
+-> 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|…|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=017|
+== sent scenario: [ORD-1, ORD-2, ORD-3, ORD-4, ORD-5]
+<- 8=FIX.4.2|9=51|35=0|34=2|49=ARTIO|…|56=QFJ|10=047|
+== received 0 execution report(s) of an expected 8
+-> 8=FIX.4.2|9=51|35=5|34=7|49=QFJ|…|56=ARTIO|10=066|
+<- 8=FIX.4.2|9=51|35=5|34=3|49=ARTIO|…|56=QFJ|10=057|
+== logout FIX.4.2:QFJ->ARTIO
+BUILD SUCCESSFUL in 22s
+```
+
+**`received 0 execution report(s) of an expected 8` is the correct result
+here.** `:artio-engine` is a receiving gateway: it hands every inbound message
+to a sink and answers session-level traffic (there is the `35=0` heartbeat and
+the `35=5` logout), but nothing in it books or fills an order. The eight reports
+appear when the counterparty is `QfjAcceptor` — which is what `QfjToQfjIT`
+asserts, and what `:artio-engine`'s initiator tests use. The demo is about the
+path into AMPS, and that path is complete.
+
+Meanwhile in the bootRun terminal:
+
+```
+INFO  ArtioRuntime  bridge-acceptor-52239-1 acquired acceptor[FIX.4.2 ARTIO<->QFJ id=1]
+INFO  StatsLogger   stats: accepted=7 published=10 pending=0 dropped=0 unroutable=0 errors=0 lost=0
+                    bytes=1504 ring=0/4194304 connected [fix.raw={published=5}, fix.orders={published=3},
+                    fix.orders={published=1}, fix.orders={published=1}, fix.execs={published=0},
+                    fix.order.state={published=0}]
+INFO  StatsLogger   sessions: [acceptor[FIX.4.2 ARTIO<->QFJ id=1]]
+INFO  ArtioRuntime  bridge-acceptor-52239-1: acceptor[FIX.4.2 ARTIO<->QFJ id=1] disconnected: LOGOUT
+```
+
+The three numbers to read:
+
+* **`accepted=7`** — every inbound message, admin included: five application
+  messages plus the `Logon` and the `Logout`. The two admin ones were counted
+  and then skipped, because `bridge.publish-admin-messages` is `false`.
+* **`published=10`** — publishes, **summed over topics**: five to `fix.raw`
+  plus five to `fix.orders` (3 × `35=D`, 1 × `35=G`, 1 × `35=F`). One message on
+  two topics is two publishes.
+* **`dropped=0 unroutable=0 lost=0 pending=0`** — the three ways a message can
+  fail to arrive, and the backlog. All zero: nothing was lost and the ring is
+  drained.
+
+`fix.execs` and `fix.order.state` stay at zero for the same reason step 3
+reported no execution reports: there is no `35=8` in this direction.
+
+### 4. Did it arrive?
+
+```bash
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"
+```
+
+```
+SOW fix.orders on tcp://localhost:9007/amps/fix
+  [1] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|52=20260907-20:07:14.151|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=106|
+  [2] 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=070|
+  [3] 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=121|
+  [4] 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=141|
+  [5] 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=017|
+5 record(s) in fix.orders
+```
+
+**Five records for three orders**, and that is the design. `fix.orders` is
+keyed on `/11` (`ClOrdID`), and a cancel/replace or a cancel carries a *new*
+`ClOrdID` with the previous one in tag 41 — so the topic holds one record per
+*request*, which is the audit shape and is robust to out-of-order arrival.
+
+Compare the bytes with what QuickFIX/J printed in step 3: identical, checksum
+included. AMPS stores a FIX payload verbatim; nothing on this path re-encodes.
+
+`fix.execs` and `fix.order.state` are empty, as the counters said:
+
+```
+SOW fix.execs on tcp://localhost:9007/amps/fix
+0 record(s) in fix.execs
+SOW fix.order.state on tcp://localhost:9007/amps/fix
+0 record(s) in fix.order.state
+```
+
+### 5. The tape
+
+```bash
+./gradlew :artio-amps-bridge:sowDump --args="--replay fix.raw"
+```
+
+```
+journal replay of fix.raw on tcp://localhost:9007/amps/fix from the epoch
+  [1] 8=FIX.4.2|…|35=D|…|11=ORD-1|…|60=20260907-02:56:16.803|10=126|
+  …
+  [21] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|52=20260907-20:07:14.151|56=ARTIO|11=ORD-1|…|10=106|
+  [22] 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-2|…|10=070|
+  [23] 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-3|…|10=121|
+  [24] 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-4|…|10=141|
+  [25] 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-5|…|10=017|
+25 message(s) in the fix.raw journal
+```
+
+**Twenty-five, not five** — this was the fifth run against the same data
+directory. `amps.sh down` removes the container and leaves
+`amps-server/data/<flow>/` alone, so the journal accumulates across
+start/down cycles. That is the point of a tape, and it is also the thing to
+know before asserting on a count by hand: delete the data directory while AMPS
+is down to start clean. (The integration suites never see this: each gets its
+own directory under `build/` and deletes it on close.)
+
+`fix.raw` has no SOW declaration, so `--topic fix.raw` finds nothing there by
+design; the journal is the only way to read it back after the fact. `fix.admin`
+has neither, so seeing admin traffic means subscribing while it happens.
+
+### 6. Stop
+
+`Ctrl-C` in the bootRun terminal, or from anywhere:
+
+```bash
+kill $(pgrep -f com.demo.artio.boot.ArtioBridgeApplication)
+```
+
+```
+INFO  ArtioRuntime              bridge-acceptor-52239-1 closed
+INFO  ArtioRuntimeLifecycle     artio runtime closed
+INFO  AmpsFixPublisher          bridge closed: accepted=7 published=10 pending=0 dropped=0 unroutable=0
+                                errors=0 lost=0 bytes=1504 ring=0/4194304 DISCONNECTED […]
+INFO  BridgePublisherLifecycle  amps publisher drained and flushed: accepted=7 published=10 pending=0 …
+```
+
+**Those two lines, in that order, are what to check**: engine closed *first*, so
+the ring buffer stopped filling; publisher drained and flushed *second*, with
+`pending=0 dropped=0`, so everything the session sent reached AMPS. The reverse
+order, or a missing second line, means the shutdown was cut short.
+
+Gradle then reports:
+
+```
+> Task :artio-spring-boot:bootRun FAILED
+> Process 'command '…/bin/java'' finished with non-zero exit value 143
+BUILD FAILED in 1m 31s
+```
+
+**143 is expected and is not a failure.** A JVM killed by SIGTERM exits
+`128 + 15` however cleanly its shutdown ran; Gradle has no way to tell that
+apart from a crash. The four log lines above are the evidence, not the exit
+code. The same applies to `:artio-amps-bridge:run`.
+
+```bash
+amps-server/scripts/amps.sh down
+```
+
+```
+removed (data in …/amps-server/data/artio-fix is untouched)
+```
+
+### Leaving nothing behind
+
+```bash
+podman ps -a --filter name=artio-amps    # no rows
+pgrep -f artio-spring-boot               # no output
+```
+
+Both were empty after this run. Artio's own directories live under
+`java.io.tmpdir` and are deleted on close, so the repository is untouched
+except for `amps-server/data/artio-fix/`, which is gitignored and is deleted
+by hand when you want a fresh journal.

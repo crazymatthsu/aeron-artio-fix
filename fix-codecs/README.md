@@ -37,7 +37,9 @@ so the engine passes `com.demo.artio.fix42.FixDictionaryImpl.class`.
 Without them the first `new NewOrderSingleEncoder()` throws
 `IllegalAccessError: class org.agrona.UnsafeApi ... cannot access class jdk.internal.misc.Unsafe`.
 This module sets them on its `Test` tasks and on the generation tasks; every downstream
-module that runs Artio has to set them too.
+module that runs Artio has to set them too. Two, not three: nothing here launches a
+`FixEngine`, so `--add-opens java.base/sun.nio.ch=ALL-UNNAMED` is not needed until
+`:artio-engine` — see [its README](../artio-engine/README.md#jvm-flags--all-three-mandatory).
 
 ## Building
 
@@ -60,6 +62,15 @@ The chain is:
 Both generation tasks declare their dictionary, parent package and generator classpath as
 inputs and their output directory as an output, and are marked cacheable, so a build with
 nothing changed is up to date in about a second.
+
+They are also **relocatable**: the dictionary input is declared `PathSensitivity.NONE` (the
+generated code depends on the file's contents, never on where it sits), the generator
+classpath uses Gradle's classpath normaliser, and each `fix.codecs.*` system property is a
+declared input in its own right. Without those three, the cache key embedded an absolute
+path and every checkout — a second clone, a CI workspace — regenerated a million lines it
+already had. With them, a fresh checkout goes straight to `FROM-CACHE`; a changed
+`fix.codecs.*` property still invalidates, which is the point of declaring them rather than
+dropping them.
 
 Measured on this machine (Corretto 21, Apple Silicon):
 

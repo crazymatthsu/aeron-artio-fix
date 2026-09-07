@@ -90,7 +90,7 @@ Spring's `DefaultLifecycleProcessor` starts phases in **ascending** order and st
 ```
  phase                                        start ▼        stop ▲
  ──────────────────────────────────────────────────────────────────────────────
- Integer.MAX_VALUE          Spring's scheduler   4             1   StatsLogger stops
+ Integer.MAX_VALUE  Boot's ThreadPoolTaskScheduler   4             1   StatsLogger stops
  MAX-1000   ArtioRuntimeLifecycle               3             2   runtime.close()
       0     (free: the IT plants a probe here)
  MIN+1000   BridgePublisherLifecycle            2             3   publisher.close()
@@ -100,10 +100,19 @@ Spring's `DefaultLifecycleProcessor` starts phases in **ascending** order and st
 
 Three details that are not obvious:
 
-**`MAX-1000`, not `MAX`.** `SmartLifecycle.DEFAULT_PHASE` is `Integer.MAX_VALUE`, and that is where
-`ScheduledAnnotationBeanPostProcessor` sits. Leaving the top slot alone means the scheduler — and
-therefore `StatsLogger` — stops *before* the engine, rather than racing a closing runtime for its
-session list.
+**`MAX-1000`, not `MAX`.** `SmartLifecycle.DEFAULT_PHASE` is `Integer.MAX_VALUE`. Leaving the top
+slot alone means `StatsLogger` is quiet *before* the engine closes, rather than racing a closing
+runtime for its session list.
+
+The mechanism is worth stating precisely, because the plausible version is wrong.
+`ScheduledAnnotationBeanPostProcessor` is **not** a lifecycle bean at `Integer.MAX_VALUE` in Spring
+6.2 — it is not a lifecycle bean at all. It cancels `@Scheduled` tasks on `ContextClosedEvent`,
+which is published **before any stop phase runs**, so `StatsLogger` is already cancelled by the time
+the phases begin unwinding. What *does* occupy `DEFAULT_PHASE` is Spring Boot's
+`ThreadPoolTaskScheduler`, whose `stop()` shuts the executor down. Either way the outcome is the one
+the design wants; the reason matters because a comment claiming the wrong mechanism is the kind that
+gets copied into a project where it is load-bearing. `LifecyclePhaseOrderingTest` asserts the
+outcome, not the folklore.
 
 **`stop(Runnable)` must be synchronous.** The callback is how a `SmartLifecycle` tells Spring its
 phase is finished. Running it before `close()` has flushed would let the container move to the next
@@ -118,6 +127,45 @@ the stop phases and in reverse dependency order, **not** in phase order. Leaving
 each object two close paths, one ordered and one not. Both `close()` methods are idempotent, so
 nothing would visibly break; it would simply become impossible to tell from the code which path did
 the flush.
+
+### 3.1 The path where no stop phase runs at all
+
+The phase table describes a **successful** refresh being shut down. A refresh that fails *after* the
+phases have started takes a different route entirely: Spring does not unwind the phases, it goes
+straight to destroying singletons. Two ways to get there, both real:
+
+* a `ContextRefreshedEvent` listener throws;
+* `ArtioRuntime.start()` fails — the port is taken, or an initiator's counterparty is not there.
+
+In either case `BridgePublisherLifecycle.stop()` is never called, so the publisher's agent thread —
+**non-daemon**, by design, because a daemon thread would be killed mid-flush — keeps running with no
+engine feeding it. The application is then neither running nor exiting: a hung JVM whose logs say
+the start-up failed. That is a worse outcome than a crash.
+
+The fix is two changes that together make the destruction path a second, ordered shutdown:
+
+* **Both adapters implement `DisposableBean`**, with `destroy()` an idempotent `stop()`. Destruction
+  now closes what the phases did not.
+* **`artioRuntimeLifecycle` takes the publisher's adapter as a constructor parameter.** It does not
+  use it; the parameter exists to create a dependency edge. Singletons are destroyed in reverse
+  dependency order, so that edge makes destruction engine-first, publisher-second — the same order
+  the phases give, obtained from the only mechanism available on this path.
+  `SpringApplicationOrderFlowIT` asserts the edge itself (`artioRuntimeLifecycle` is a dependent of
+  `bridgePublisherLifecycle`), so it cannot be removed as an unused parameter.
+
+Result: the publisher is still drained and flushed, and the JVM **exits non-zero** instead of
+hanging. `ContextRefreshFailureTest` drives both failure paths against a real application;
+`BootJarFailedStartIT` points the fat jar at a dead AMPS port and asserts the process exits non-zero
+rather than lingering.
+
+### 3.2 The context is not restartable
+
+`stop()` followed by `start()` on a live context does **not** work: both `ArtioRuntime` and
+`AmpsFixPublisher` refuse a second `start()` after `close()`, so the second phase run throws instead
+of half-working. This is documented in both adapters' Javadoc rather than fixed, and deliberately —
+"restart" here means rebuilding an Aeron media driver, an archive, an engine, a library and an AMPS
+connection, and a half-restarted gateway that accepts logons but publishes nowhere is a worse
+failure than a refusal. Build a new context.
 
 ### It is tested, not asserted
 
@@ -323,6 +371,22 @@ Two things learned doing it:
   was running on the machine. Overrides in tests and on the command line go through
   `run("--artio.port=…")`, which lands in `commandLineArgs`, near the top.
 
+One place where the two entry points genuinely differ, and where "the same file" stops being true:
+**`artio.fixVersion`**. `BridgeMain` normalises the value (upper-case, strip `.` and `FIX`), so it
+accepts a bare `4.2`; `ArtioProperties` matches `FIX.4.2` / `FIX42` / `FIX.4.4` / `FIX44`
+case-insensitively and rejects anything else, naming the key. The shipped `bridge.properties` writes
+`FIX.4.2`, so it binds here unchanged — but a hand-edited file that says `4.2` will fail the Spring
+context and pass under `BridgeMain`, which is the sort of asymmetry worth knowing before it is
+diagnosed.
+
+The three **initiator reconnect** keys added with `SessionListener.onReconnectAttempt` —
+`artio.reconnect-enabled` (`true`), `artio.reconnect-initial-backoff-ms` (`1000`) and
+`artio.reconnect-max-backoff-ms` (`30000`) — reach `FixEngineConfig` through `toFixEngineConfig()`
+like every other `artio.*` key, and are pinned by
+`PropertyBindingTest.theInitiatorReconnectKeysReachTheEngineConfig`. Without them a Spring-hosted
+initiator could neither disable reconnect nor tune it, which would have made the Spring wrapper
+strictly less capable than the engine underneath it. An acceptor ignores all three.
+
 Validation is in two layers on purpose. Jakarta constraints catch what a field can express and name
 the offending key at bind time (`artio.port` `must be less than or equal to 65535`);
 `toFixEngineConfig()` and `toBridgeConfig()` then hand the values to `FixEngineConfig` and
@@ -448,9 +512,12 @@ it, rather than merging across sources. That is exactly the `BridgeMain` semanti
 with two rules yields two rules, not two plus the five it did not mention — and
 `PropertyBindingTest` pins it.
 
-**11.5 Quote numeric `MsgType`s in YAML.** `msg-type: 8` is the integer 8 and the binder says so;
-`msg-type: "8"` is an execution report. `bridge.properties` has no such problem, which is one small
-argument for keeping the properties file as the canonical example.
+**11.5 Quoting a numeric `MsgType` in YAML is optional.** YAML reads `msg-type: 8` as an integer,
+but the target component is a `String` and Spring's binder converts it, so an **unquoted `8` binds
+as `"8"`** and the route works. `msg-type: "8"` is clearer to a reader and is what the shipped
+examples use, but a document (or a comment) claiming the unquoted form *fails* is wrong, and sends
+someone hunting for a binding error that is not there. The `custom-routes` test profile binds an
+unquoted `8` on purpose so the claim stays checked.
 
 **11.6 The `slf4j-simple` leak.** `:artio-amps-bridge` declares `runtimeOnly(libs.slf4j.simple)`
 because it has a `main` of its own, and a `runtimeOnly` dependency of a project dependency **is** on
@@ -460,8 +527,12 @@ both be present, SLF4J would bind one arbitrarily with a "multiple bindings" war
 (`configurations.configureEach { exclude(group = "org.slf4j", module = "slf4j-simple") }`); verify
 with `./gradlew :artio-spring-boot:dependencies --configuration runtimeClasspath | grep slf4j`,
 which should show `slf4j-api`, `logback-classic`, `log4j-to-slf4j` and `jul-to-slf4j`, and no
-`slf4j-simple`. The clean fix is `:artio-amps-bridge` moving its binding to its `application`
-runtime only; that is a change to another module and is left to the review phase.
+`slf4j-simple`.
+
+**Since fixed at the source.** `:artio-amps-bridge` now keeps `slf4j-simple` in a dedicated
+`mainLogging` configuration added only to its `run` and `sowDump` task classpaths, so a
+`java-library` no longer ships a binding to its consumers at all. The exclude here is belt and
+braces; the `dependencies` check above still passes, and now passes for the right reason.
 
 ---
 
