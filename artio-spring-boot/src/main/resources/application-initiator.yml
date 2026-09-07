@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# The `initiator` profile: the same bridge, dialling out instead of listening.
+#
+#   ./gradlew :artio-spring-boot:bootRun -Dspring.profiles.active=initiator
+#   java ... -jar artio-spring-boot.jar --spring.profiles.active=initiator
+#
+# Point it at the QuickFIX/J acceptor from :quickfixj-counterparty:
+#
+#   ./gradlew :quickfixj-counterparty:run \
+#       --args="acceptor --port 9881 --version FIX.4.2 --sender QFJ --target ARTIO"
+#
+# Only the keys that differ from application.yml are repeated here; profile
+# documents are merged over the default one, not substituted for it.
+# ---------------------------------------------------------------------------
+
+artio:
+  # Connect out rather than bind. `host`/`port` are now the REMOTE address, and
+  # `start()` does not return until the logon exchange has completed (or
+  # logon-timeout-ms has passed, and then it throws and the context fails to
+  # refresh - which is the right answer for an initiator: an initiator that
+  # cannot log on has nothing to do).
+  mode: initiator
+  host: localhost
+  port: 9881
+  # An initiator drives the logon, so this is the side that decides to reset.
+  reset-seq-nums-on-logon: true
+  # Long enough for a counterparty that is still starting up on the same
+  # laptop; shorten it against a venue that is either there or is not.
+  logon-timeout-ms: 20000
+
+bridge:
+  # Nothing about the AMPS side changes with the FIX role: the same routes, the
+  # same topics, the same ring buffer. Named here only to make that explicit.
+  uri: tcp://localhost:9007/amps/fix
+  client-name: artio-bridge-initiator

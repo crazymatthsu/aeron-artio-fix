@@ -1,0 +1,57 @@
+# The AMPS instance for this repository, declaratively.
+#
+# NOT an entry point. Every ${VAR} below is resolved from the environment of
+# whatever process invokes compose, and populating that environment is the job
+# of one of exactly two callers:
+#
+#   amps-server/scripts/amps.sh                     the developer path
+#   com.demo.artio.testharness.AmpsComposeServer    the integration-test path
+#
+# Both set the same variable names, so the two produce identical containers
+# apart from ports, container name and data directory. Run either of those;
+# a bare `podman compose -f amps-server/docker-compose.yml up` has no image
+# and no bind mounts and will fail on the first line.
+#
+# See amps-server/README.md for the flow layout and docs/05-integration-testing-and-demo.md
+# for how the harness drives this file.
+
+services:
+  amps:
+    # There is no public AMPS server image: 60East ships the server as a
+    # licensed release tarball (see Containerfile). ${VAR:?msg} fails with a
+    # reason instead of the container engine's "invalid reference format".
+    image: ${AMPS_IMAGE:?AMPS_IMAGE is not set - run amps-server/scripts/amps.sh, which defaults it, or export it yourself}
+    # The AMPS distribution is Linux x86_64 only, so the image is amd64 and an
+    # Apple Silicon host runs it emulated. That emulation is why every timeout
+    # in the harness is generous.
+    platform: ${AMPS_PLATFORM:-linux/amd64}
+    # Fixed name, not compose's generated <project>_amps_1: the wait loop and
+    # the harness both read the log with `podman logs <name>`, which is the one
+    # reliable way to get it out of podman-compose.
+    container_name: ${AMPS_CONTAINER_NAME:-artio-amps}
+    entrypoint: ["${AMPS_BIN:-/opt/amps/bin/ampServer}"]
+    # Each flow directory holds exactly one file, always called
+    # amps-config.xml, so the in-container path never varies with the flow.
+    command: ["/amps/config/amps-config.xml"]
+    # AMPS resolves the relative paths in amps-config.xml (./sow, ./journal,
+    # ./stats) against its working directory, which is the bind-mounted data
+    # volume - so all persistent state lands on the host where it can be
+    # inspected and deleted.
+    working_dir: /amps/data
+    # Loopback only. Every client of this instance - the bridge, the demo, the
+    # integration suites - runs on this host, and AMPS here has no
+    # authentication; without the address the engine publishes on every
+    # interface and a laptop on a shared network is serving an open SOW.
+    ports:
+      - "127.0.0.1:${AMPS_PORT:-9007}:9007"
+      - "127.0.0.1:${AMPS_WS_PORT:-9008}:9008"
+      - "127.0.0.1:${AMPS_ADMIN_PORT:-8085}:8085"
+    volumes:
+      # Whole "host:container[:z]" strings, assembled by the caller, so the
+      # SELinux :z suffix can be added on Linux and left off on macOS (where
+      # podman rejects it inside the VM's virtiofs mounts).
+      - ${AMPS_CONFIG_VOLUME:?AMPS_CONFIG_VOLUME is not set - it must be <abs flow dir>:/amps/config}
+      - ${AMPS_DATA_VOLUME:?AMPS_DATA_VOLUME is not set - it must be <abs data dir>:/amps/data}
+    # A test harness that has decided the container is broken must not race a
+    # restart policy while it reads the log and tears down.
+    restart: "no"

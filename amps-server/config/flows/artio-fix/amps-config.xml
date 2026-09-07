@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Business flow "artio-fix": the AMPS instance the Artio FIX engine publishes
+  into.
+
+  What arrives here is RAW FIX, byte for byte as it came off the session:
+  SOH-separated tag=value, never re-encoded. That is the whole point of the
+  bridge - Artio hands the library a DirectBuffer, the bridge copies it into a
+  byte array and calls the AMPS byte array publish, and no String, no JSON and
+  no schema exists anywhere on that path. AMPS parses FIX natively
+  (MessageType fix), so SOW keys and content filters name FIX TAG NUMBERS:
+  /11 is ClOrdID, /17 ExecID, /37 OrderID.
+
+  The client selects that parser in its connection URI, not per topic:
+
+      tcp://127.0.0.1:9007/amps/fix
+
+  Connect on /amps/json to these topics and nothing parses; you get a
+  connection and then silence, which is a confusing failure. Every publisher
+  and every reader of this instance uses /amps/fix.
+
+  TOPIC MAP, and the one rule that shapes it
+  ==========================================
+  Publishing to a SOW topic a message that does not carry the topic's KEY
+  FIELD is silent, unbounded data loss. So the topic set is not "one topic per
+  consumer taste" - it is driven by which tag is guaranteed present on which
+  FIX message type:
+
+      35=D / G / F  (NewOrderSingle, CancelReplace, Cancel)  always carry 11
+      35=8          (ExecutionReport)                        always carry 17 and 37
+      session admin (35=0 / 1 / 2 / 4 / 5 / A / 3)           carry no order tag at all
+
+  which is exactly the split below.
+
+  Be precise about what "silent" means here, because it is worse than the
+  usual telling. It is widely said that AMPS REJECTS a SOW publish lacking its
+  key. Measured against 5.3.5.135 with MessageType fix, it does not: the
+  message is accepted, no error reaches the publisher, nothing is logged, and
+  the record is stored under one degenerate key shared by every such message.
+  Publish three keyless messages and the topic holds ONE record: the third.
+  The first two are gone, and the only visible symptom is a SOW that looks
+  oddly short.
+
+  The bridge's TopicRouter enforcing "this tag must be present before routing
+  here" (see docs/03) is therefore not a belt-and-braces nicety mirroring a
+  server check. It is the ONLY thing standing between a mis-tagged message and
+  a quietly truncated blotter.
+
+  Ports: 9007 amps/tcp, 9008 websocket, 8085 admin UI.
+-->
+<AMPSConfig>
+
+    <Name>artio-fix</Name>
+
+    <!--
+      Admin/monitoring HTTP interface: http://localhost:8085/
+
+      SQLTransport names a <Transport> below, NOT a port. It turns on the SQL
+      console in the admin UI, which is the fastest way to look at what the
+      bridge published without writing a client: the page is served over HTTP
+      on 8085 but runs its queries over the websocket transport, so a browser
+      needs to reach 9008 as well.
+    -->
+    <Admin>
+        <InetAddr>8085</InetAddr>
+        <SQLTransport>amps-websocket</SQLTransport>
+        <FileName>./stats/stats.db</FileName>
+        <Interval>10s</Interval>
+    </Admin>
+
+    <Transports>
+        <!-- One transport serves every message type; the client picks the type
+             in its URI path. The bridge and the test harness both use
+             /amps/fix on this one. -->
+        <Transport>
+            <Name>amps-tcp</Name>
+            <Type>tcp</Type>
+            <InetAddr>9007</InetAddr>
+            <ReuseAddr>true</ReuseAddr>
+            <Protocol>amps</Protocol>
+        </Transport>
+
+        <!-- Same instance over WebSocket: browser clients and the admin UI's
+             SQL console. Required by <SQLTransport> above. -->
+        <Transport>
+            <Name>amps-websocket</Name>
+            <Type>tcp</Type>
+            <InetAddr>9008</InetAddr>
+            <ReuseAddr>true</ReuseAddr>
+            <Protocol>websocket</Protocol>
+        </Transport>
+    </Transports>
+
+    <!--
+      stdout, so `podman logs` is the log. Both the shell script's `wait` and
+      the test harness detect readiness by watching for the server's own
+      startup-complete line (message code 00-0015) there; route logging to a
+      file instead and readiness detection goes blind.
+
+      Note for anyone editing the comments in this file: AMPS ECHOES THE WHOLE
+      CONFIG into that same log at startup, comments included. So a comment
+      here that quoted the startup-complete line verbatim would appear in the
+      log about a second BEFORE the server was actually up, and every reader
+      watching for it would be fooled. That is why the phrase is described
+      rather than quoted, and why the readiness marker both consumers match on
+      includes the numeric message code.
+    -->
+    <Logging>
+        <Target>
+            <Protocol>stdout</Protocol>
+            <Level>info</Level>
+        </Target>
+    </Logging>
+
+    <!--
+      ===================================================================
+      SOW - State of the World
+      ===================================================================
+      Declaring a topic here turns a stream into a queryable, keyed table
+      maintained by the server: sow queries, sow_and_subscribe, delta_publish,
+      OOF and per-record expiration all become available for it. A topic NOT
+      declared here still works - it is an ordinary dynamic pub/sub topic,
+      created on first publish, with no state kept. fix.raw and fix.admin are
+      deliberately of that second kind.
+
+      <FileName> is spelled out for every topic rather than using %n. %n
+      expands to the topic name, and these names contain dots; the expansion
+      would work today but the explicit filename is what makes `ls
+      amps-server/data/artio-fix/sow` readable, and it survives a topic rename
+      that would otherwise silently orphan the old file.
+
+      EXPECT THIS WARNING at every startup, once per topic below:
+
+        00-0007 Topic 'fix.orders' has regular expression characters which
+        could cause unintentional misrouting of messages.
+
+      It is the dot. AMPS notices that a <Name> could be read as a pattern and
+      says so. It is noise here, and was checked rather than assumed:
+      publishing to fixZorders on 5.3.5.135 does NOT land in fix.orders (the
+      SOW query returns nothing, and fixZorders is not a topic at all), so the
+      names route literally. The dotted names come from the plan and are the
+      names the bridge and every consumer use; do not rename them to silence
+      the warning. Note that the same is NOT true of <Pattern>, which really
+      is a regex.
+    -->
+    <SOW>
+
+        <!--
+          fix.orders - one record per ClOrdID.
+
+          Keyed /11 because ClOrdID is the client's id for THIS request and is
+          mandatory on 35=D, 35=G and 35=F. A cancel/replace carries a new 11
+          and the previous one in 41, so this topic holds one record per
+          REQUEST, not per order chain: three records for an order that was
+          placed, replaced and cancelled. That is the audit shape, and it is
+          the one that survives out-of-order delivery.
+
+          JOURNALLED. It is a system of record: the requests this engine sent
+          or received, as sent. Nothing derives it.
+        -->
+        <Topic>
+            <Name>fix.orders</Name>
+            <MessageType>fix</MessageType>
+            <Key>/11</Key>
+            <FileName>./sow/fix-orders.sow</FileName>
+            <Durability>persistent</Durability>
+        </Topic>
+
+        <!--
+          fix.execs - one record per ExecID: the fills history.
+
+          Keyed /17 because ExecID is unique per ExecutionReport, so this is a
+          keyed event log rather than a last-value store: every 35=8 keeps its
+          own record. "How did this order fill" is a filtered query here
+          (/37 = 'the OrderID'), ordered by whatever the reports carry.
+
+          JOURNALLED. Same reason as fix.orders: it is the record of what the
+          counterparty actually said, and fix.order.state is derived from it.
+        -->
+        <Topic>
+            <Name>fix.execs</Name>
+            <MessageType>fix</MessageType>
+            <Key>/17</Key>
+            <FileName>./sow/fix-execs.sow</FileName>
+            <Durability>persistent</Durability>
+        </Topic>
+
+        <!--
+          fix.order.state - one record per OrderID: the live blotter.
+
+          Keyed /37 (OrderID, the venue's id for the order), and fed only
+          35=8. FIX execution reports are CUMULATIVE SNAPSHOTS - each one
+          carries the running 14 CumQty, 151 LeavesQty, 6 AvgPx and 39
+          OrdStatus - so "the latest report per OrderID" IS current order
+          state, with no aggregation anywhere.
+
+          Requests (35=D/G/F) must never be published here: they carry no tag
+          37, and rather than being refused they would all pile onto one
+          keyless record, each overwriting the last. See the header.
+
+          NOT journalled. Every record in it is the last message of a stream
+          that fix.execs already journals, so replaying fix.execs rebuilds
+          this topic exactly. Journalling it would write the same bytes twice.
+        -->
+        <Topic>
+            <Name>fix.order.state</Name>
+            <MessageType>fix</MessageType>
+            <Key>/37</Key>
+            <FileName>./sow/fix-order-state.sow</FileName>
+            <Durability>persistent</Durability>
+        </Topic>
+
+    </SOW>
+
+    <!--
+      ===================================================================
+      Topics with no SOW, listed here for the reader
+      ===================================================================
+      Neither of these needs a declaration: an AMPS topic that is not in <SOW>
+      is created on first publish and keeps no state. They are described here
+      because they are part of the flow's contract even though the file has
+      nothing to say to the server about them.
+
+      fix.raw - EVERY application message the engine saw, in arrival order,
+          exactly as received. No SOW: a raw FIX message has no field that is
+          guaranteed unique across message types, so there is no honest key,
+          and a wrong key silently collapses records. Its consumers want
+          history, not state.
+
+          JOURNALLED (below). This is the tape. A bookmark subscription from
+          Client.Bookmarks.EPOCH replays it from the beginning, which is how
+          the harness counts what the journal holds and how a downstream
+          rebuild starts from nothing.
+
+      fix.admin - session-level traffic (Logon, Logout, Heartbeat, TestRequest,
+          ResendRequest, SequenceReset, Reject) when the bridge is configured
+          to publish it; by default it is not. No SOW and NOT journalled: it
+          is operational noise for a live session monitor, it carries no order
+          tag to key on, and Artio's own log is the durable record of the
+          session. Journalling a heartbeat every 30 seconds per session would
+          be the largest stream in the instance and the least useful.
+    -->
+
+    <!--
+      ===================================================================
+      TransactionLog
+      ===================================================================
+      The journal is the durable, ordered record of every message published to
+      the topics listed here. It backs bookmark subscriptions ("replay me
+      everything since X"), publisher deduplication, and SOW recovery after an
+      unclean shutdown. A topic absent from this list is not replayable, at
+      all - that is the choice being made for fix.order.state and fix.admin
+      above, and the reason is written next to each.
+
+      MinJournalSize 10MB is the FLOOR, not a tuning choice: ask for less and
+      the server silently resets it to 10MB with a warning at startup
+      (verified against 5.3.5.135). With PreallocatedJournalFiles 2 that means
+      this instance reserves about 20MB of journal on first start, which is
+      why amps-server/data is gitignored.
+
+      Every entry names topic AND message type; `fix` here, matching the
+      publishers.
+    -->
+    <TransactionLog>
+        <JournalDirectory>./journal</JournalDirectory>
+        <PreallocatedJournalFiles>2</PreallocatedJournalFiles>
+        <MinJournalSize>10MB</MinJournalSize>
+
+        <Topic>
+            <Name>fix.raw</Name>
+            <MessageType>fix</MessageType>
+        </Topic>
+        <Topic>
+            <Name>fix.orders</Name>
+            <MessageType>fix</MessageType>
+        </Topic>
+        <Topic>
+            <Name>fix.execs</Name>
+            <MessageType>fix</MessageType>
+        </Topic>
+    </TransactionLog>
+
+</AMPSConfig>
