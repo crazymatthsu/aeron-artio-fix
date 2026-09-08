@@ -6,13 +6,16 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 
 /**
- * Builds the three order messages this counterparty sends, on either FIX version.
+ * Builds the four messages this counterparty sends on a drop copy session - the three order
+ * requests and the {@code ExecutionReport} - on either FIX version.
  *
  * <p>Every message is a plain {@link Message} with fields set by tag number rather than a
  * {@code quickfix.fix42.NewOrderSingle} or {@code quickfix.fix44.NewOrderSingle}. That keeps one
- * implementation for both versions; the only real difference between them here is
+ * implementation for both versions; the differences between them here are exactly three:
  * {@code HandlInst(21)}, which FIX 4.2 requires on {@code NewOrderSingle} and
- * {@code OrderCancelReplaceRequest} and FIX 4.4 does not.
+ * {@code OrderCancelReplaceRequest} and FIX 4.4 does not; {@code ExecTransType(20)}, which FIX 4.2
+ * requires on every {@code ExecutionReport} and FIX 4.4 removed; and the {@code ExecType(150)}
+ * value for a trade, which {@link QfjVersion#execType} decides.
  */
 public final class Orders
 {
@@ -30,6 +33,21 @@ public final class Orders
 
     /** {@code Side(54)} = Sell. */
     public static final char SIDE_SELL = '2';
+
+    /** {@code OrdStatus(39)} = New: acknowledged and working. */
+    public static final char ORD_STATUS_NEW = '0';
+
+    /** {@code OrdStatus(39)} = Partially filled. */
+    public static final char ORD_STATUS_PARTIALLY_FILLED = '1';
+
+    /** {@code OrdStatus(39)} = Filled. */
+    public static final char ORD_STATUS_FILLED = '2';
+
+    /** {@code OrdStatus(39)} = Canceled. */
+    public static final char ORD_STATUS_CANCELED = '4';
+
+    /** {@code ExecTransType(20)} = New. FIX 4.2 only; the field does not exist in FIX 4.4. */
+    public static final char EXEC_TRANS_TYPE_NEW = '0';
 
     private Orders()
     {
@@ -138,6 +156,55 @@ public final class Orders
     }
 
     /**
+     * Builds an {@code ExecutionReport(35=8)} for one step of a drop copy stream.
+     *
+     * <p>Every field either dictionary declares required is written: {@code OrderID(37)},
+     * {@code ExecID(17)}, {@code ExecType(150)}, {@code OrdStatus(39)}, {@code Symbol(55)},
+     * {@code Side(54)}, {@code LeavesQty(151)}, {@code CumQty(14)} and {@code AvgPx(6)}, plus
+     * {@code ExecTransType(20)} on FIX 4.2, where it is required and where FIX 4.4 does not have the
+     * field at all. {@code ClOrdID(11)}, {@code OrderQty(38)} and {@code TransactTime(60)} are
+     * optional in both and are always written: the first is what a consumer joins on, the second is
+     * what makes {@code LeavesQty} readable, and the third is what makes the report timestamped.
+     * {@code OrigClOrdID(41)}, {@code LastShares/LastQty(32)} and {@code LastPx(31)} appear only on
+     * the reports that have them - a report that carries a {@code LastQty} of zero says a trade
+     * happened for nothing, which is not what an acknowledgement means.
+     *
+     * @param version the FIX version.
+     * @param report  the report to build.
+     * @return the message, without header CompIDs: QuickFIX/J fills those in when it sends it.
+     */
+    public static Message executionReport(final QfjVersion version, final OrderScenario.Report report)
+    {
+        final Message message = message(Tags.MSG_TYPE_EXECUTION_REPORT);
+        message.setString(Tags.ORDER_ID, report.orderId());
+        message.setString(Tags.EXEC_ID, report.execId());
+        if (version.hasExecTransType())
+        {
+            message.setChar(Tags.EXEC_TRANS_TYPE, EXEC_TRANS_TYPE_NEW);
+        }
+        message.setChar(Tags.EXEC_TYPE, version.execType(report.execEvent()));
+        message.setChar(Tags.ORD_STATUS, report.ordStatus());
+        message.setString(Tags.CL_ORD_ID, report.clOrdId());
+        if (report.origClOrdId() != null)
+        {
+            message.setString(Tags.ORIG_CL_ORD_ID, report.origClOrdId());
+        }
+        message.setString(Tags.SYMBOL, report.symbol());
+        message.setChar(Tags.SIDE, report.side());
+        message.setDouble(Tags.ORDER_QTY, report.orderQty());
+        if (report.traded())
+        {
+            message.setDouble(Tags.LAST_QTY, report.lastQty());
+            message.setDouble(Tags.LAST_PX, report.lastPx());
+        }
+        message.setDouble(Tags.LEAVES_QTY, report.leavesQty());
+        message.setDouble(Tags.CUM_QTY, report.cumQty());
+        message.setDouble(Tags.AVG_PX, report.avgPx());
+        message.setUtcTimeStamp(Tags.TRANSACT_TIME, utcNow(), true);
+        return message;
+    }
+
+    /**
      * Turns one scenario step into a message.
      *
      * @param version the FIX version.
@@ -146,19 +213,16 @@ public final class Orders
      */
     public static Message toMessage(final QfjVersion version, final OrderScenario.Step step)
     {
-        if (step instanceof OrderScenario.NewOrder newOrder)
+        return switch (step)
         {
-            return newOrderSingle(version, newOrder.clOrdId(), newOrder.symbol(), newOrder.side(),
-                newOrder.qty(), newOrder.price());
-        }
-        if (step instanceof OrderScenario.Replace replace)
-        {
-            return cancelReplace(version, replace.origClOrdId(), replace.clOrdId(), replace.symbol(),
-                replace.side(), replace.qty(), replace.price());
-        }
-        final OrderScenario.Cancel cancel = (OrderScenario.Cancel)step;
-        return cancel(version, cancel.origClOrdId(), cancel.clOrdId(), cancel.symbol(), cancel.side(),
-            cancel.qty());
+            case OrderScenario.NewOrder newOrder -> newOrderSingle(version, newOrder.clOrdId(),
+                newOrder.symbol(), newOrder.side(), newOrder.qty(), newOrder.price());
+            case OrderScenario.Replace replace -> cancelReplace(version, replace.origClOrdId(),
+                replace.clOrdId(), replace.symbol(), replace.side(), replace.qty(), replace.price());
+            case OrderScenario.Cancel cancelStep -> cancel(version, cancelStep.origClOrdId(),
+                cancelStep.clOrdId(), cancelStep.symbol(), cancelStep.side(), cancelStep.qty());
+            case OrderScenario.Report report -> executionReport(version, report);
+        };
     }
 
     private static Message message(final String msgType)

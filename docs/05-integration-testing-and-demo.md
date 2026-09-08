@@ -327,9 +327,12 @@ unlike `<Name>`, really is a regex.
 ## 9. Demo runbook
 
 Six commands, from the repository root, **one process at a time**. Everything
-below is the real output of a run on 2026-09-07 (podman 5.8.2,
+below is the real output of runs on 2026-09-07 (podman 5.8.2,
 `localhost/amps-demo:5.3.5.135`, Corretto/Temurin 21 on Apple Silicon), trimmed
-to the interesting lines. SOH is shown as `|`.
+to the interesting lines. SOH is shown as `|`. Steps 3 to 6 were re-captured
+when the execution reports were scripted into the scenario (`docs/07`), from a
+run of the same application on a second port, so the runtime id there
+(`bridge-acceptor-81490-1`) is not the one step 2 shows.
 
 Prerequisite: the AMPS image exists locally. There is no public one — build it
 from a 60East release tarball with `amps-server/Containerfile`, or reuse the
@@ -412,58 +415,79 @@ In a second terminal:
     --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
 ```
 
+This is a **drop copy** session: fifteen application messages, all of them
+*sent* — five order events and the ten execution reports those orders produced
+on the venue the copy comes from (`docs/07`). Real output, timestamps trimmed:
+
 ```
--> 8=FIX.4.2|9=69|35=A|34=1|49=QFJ|52=20260907-20:07:14.105|56=ARTIO|98=0|108=10|141=Y|10=140|
-<- 8=FIX.4.2|9=69|35=A|34=1|49=ARTIO|52=20260907-20:07:14.142|56=QFJ|98=0|108=10|141=Y|10=141|
+-> 8=FIX.4.2|9=69|35=A|34=1|49=QFJ|52=20260907-22:34:11.031|56=ARTIO|98=0|108=10|141=Y|10=137|
+<- 8=FIX.4.2|9=69|35=A|34=1|49=ARTIO|52=20260907-22:34:10.935|56=QFJ|98=0|108=10|141=Y|10=149|
 == logon FIX.4.2:QFJ->ARTIO
--> 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|…|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=106|
--> 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|…|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=070|
--> 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|…|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=121|
--> 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|…|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=141|
--> 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|…|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=017|
+-> 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|…|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=112|
+-> 8=FIX.4.2|9=159|35=8|34=3|49=QFJ|…|56=ARTIO|6=0|11=ORD-1|14=0|17=EXEC-1|20=0|37=ORDER-1|38=100|39=0|54=1|55=MSFT|60=…|150=0|151=100|10=089|
+-> 8=FIX.4.2|9=180|35=8|34=4|49=QFJ|…|56=ARTIO|6=101.25|11=ORD-1|14=50|17=EXEC-2|20=0|31=101.25|32=50|37=ORDER-1|38=100|39=1|54=1|55=MSFT|60=…|150=1|151=50|10=042|
+-> 8=FIX.4.2|9=129|35=D|34=5|49=QFJ|…|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=082|
+-> 8=FIX.4.2|9=159|35=8|34=6|49=QFJ|…|56=ARTIO|6=0|11=ORD-2|14=0|17=EXEC-3|20=0|37=ORDER-2|38=200|39=0|54=1|55=MSFT|60=…|150=0|151=200|10=104|
+-> 8=FIX.4.2|9=181|35=8|34=7|49=QFJ|…|56=ARTIO|6=102.5|11=ORD-2|14=100|17=EXEC-4|20=0|31=102.5|32=100|37=ORDER-2|38=200|39=1|54=1|55=MSFT|60=…|150=1|151=100|10=091|
+-> 8=FIX.4.2|9=130|35=D|34=8|49=QFJ|…|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=141|
+-> 8=FIX.4.2|9=159|35=8|34=9|49=QFJ|…|56=ARTIO|6=0|11=ORD-3|14=0|17=EXEC-5|20=0|37=ORDER-3|38=300|39=0|54=1|55=MSFT|60=…|150=0|151=300|10=119|
+-> 8=FIX.4.2|9=184|35=8|34=10|49=QFJ|…|56=ARTIO|6=103.75|11=ORD-3|14=150|17=EXEC-6|20=0|31=103.75|32=150|37=ORDER-3|38=300|39=1|54=1|55=MSFT|60=…|150=1|151=150|10=016|
+-> 8=FIX.4.2|9=182|35=8|34=11|49=QFJ|…|56=ARTIO|6=103.75|11=ORD-3|14=300|17=EXEC-7|20=0|31=103.75|32=150|37=ORDER-3|38=300|39=2|54=1|55=MSFT|60=…|150=2|151=0|10=137|
+-> 8=FIX.4.2|9=135|35=G|34=12|49=QFJ|…|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=176|
+-> 8=FIX.4.2|9=175|35=8|34=13|49=QFJ|…|56=ARTIO|6=101.25|11=ORD-4|14=50|17=EXEC-8|20=0|37=ORDER-1|38=150|39=1|41=ORD-1|54=1|55=MSFT|60=…|150=5|151=100|10=157|
+-> 8=FIX.4.2|9=184|35=8|34=14|49=QFJ|…|56=ARTIO|6=101.5833|11=ORD-4|14=150|17=EXEC-9|20=0|31=101.75|32=100|37=ORDER-1|38=150|39=2|54=1|55=MSFT|60=…|150=2|151=0|10=247|
+-> 8=FIX.4.2|9=115|35=F|34=15|49=QFJ|…|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=056|
+-> 8=FIX.4.2|9=174|35=8|34=16|49=QFJ|…|56=ARTIO|6=102.5|11=ORD-5|14=100|17=EXEC-10|20=0|37=ORDER-2|38=200|39=4|41=ORD-2|54=1|55=MSFT|60=…|150=4|151=0|10=101|
 == sent scenario: [ORD-1, ORD-2, ORD-3, ORD-4, ORD-5]
-<- 8=FIX.4.2|9=51|35=0|34=2|49=ARTIO|…|56=QFJ|10=047|
-== received 0 execution report(s) of an expected 8
--> 8=FIX.4.2|9=51|35=5|34=7|49=QFJ|…|56=ARTIO|10=066|
-<- 8=FIX.4.2|9=51|35=5|34=3|49=ARTIO|…|56=QFJ|10=057|
+== sent 15 message(s): 5 order event(s) and 10 execution report(s) [EXEC-1, EXEC-2, EXEC-3, EXEC-4, EXEC-5, EXEC-6, EXEC-7, EXEC-8, EXEC-9, EXEC-10]
+== the peer answered with no execution reports, which is what a drop copy consumer does
+-> 8=FIX.4.2|9=52|35=5|34=17|49=QFJ|…|56=ARTIO|10=123|
+<- 8=FIX.4.2|9=51|35=5|34=2|49=ARTIO|…|56=QFJ|10=064|
 == logout FIX.4.2:QFJ->ARTIO
-BUILD SUCCESSFUL in 22s
 ```
 
-**`received 0 execution report(s) of an expected 8` is the correct result
-here.** `:artio-engine` is a receiving gateway: it hands every inbound message
-to a sink and answers session-level traffic (there is the `35=0` heartbeat and
-the `35=5` logout), but nothing in it books or fills an order. The eight reports
-appear when the counterparty is `QfjAcceptor` — which is what `QfjToQfjIT`
-asserts, and what `:artio-engine`'s initiator tests use. The demo is about the
-path into AMPS, and that path is complete.
+Three lines are worth reading twice:
 
-Meanwhile in the bootRun terminal:
+* **`150=1` then `150=2`** on `ORD-3`, and `39=1` then `39=2`: a partial fill and
+  then the fill. On FIX 4.4 both would be `150=F` and only `OrdStatus` would
+  tell them apart. `20=0` is `ExecTransType`, which FIX 4.2 requires and FIX 4.4
+  removed.
+* **`6=101.5833`** on `EXEC-9`: `AvgPx` is the quantity-weighted average of both
+  fills of `ORD-1`, `(50 × 101.25 + 100 × 101.75) / 150`, not the last price.
+* **`== the peer answered with no execution reports`** is the correct result.
+  `:artio-engine` is a receiving gateway: it hands every inbound message to a
+  sink and answers session-level traffic (there is the `35=5` logout), but
+  nothing in it books or fills an order — and on a drop copy nothing should.
+  Point the same command at `quickfixj-counterparty acceptor`, which is a venue,
+  and the line reads `the peer answered with 8 execution report(s)`.
+
+Meanwhile in the bootRun terminal (this capture is from `bootJar`'s output run
+as `java -jar` on a second port — the same application, the same lines):
 
 ```
-INFO  ArtioRuntime  bridge-acceptor-52239-1 acquired acceptor[FIX.4.2 ARTIO<->QFJ id=1]
-INFO  StatsLogger   stats: accepted=7 published=10 pending=0 dropped=0 unroutable=0 errors=0 lost=0
-                    bytes=1504 ring=0/4194304 connected [fix.raw={published=5}, fix.orders={published=3},
-                    fix.orders={published=1}, fix.orders={published=1}, fix.execs={published=0},
-                    fix.order.state={published=0}]
+INFO  ArtioRuntime  bridge-acceptor-81490-1 acquired acceptor[FIX.4.2 ARTIO<->QFJ id=1]
+INFO  StatsLogger   stats: accepted=16 published=40 pending=0 dropped=0 unroutable=0 errors=0 lost=0
+                    bytes=7409 ring=0/4194304 connected [fix.raw={published=15}, fix.orders={published=3},
+                    fix.orders={published=1}, fix.orders={published=1}, fix.execs={published=10},
+                    fix.order.state={published=10}]
 INFO  StatsLogger   sessions: [acceptor[FIX.4.2 ARTIO<->QFJ id=1]]
-INFO  ArtioRuntime  bridge-acceptor-52239-1: acceptor[FIX.4.2 ARTIO<->QFJ id=1] disconnected: LOGOUT
+INFO  ArtioRuntime  bridge-acceptor-81490-1: acceptor[FIX.4.2 ARTIO<->QFJ id=1] disconnected: LOGOUT
 ```
 
-The three numbers to read:
+The numbers to read:
 
-* **`accepted=7`** — every inbound message, admin included: five application
-  messages plus the `Logon` and the `Logout`. The two admin ones were counted
-  and then skipped, because `bridge.publish-admin-messages` is `false`.
-* **`published=10`** — publishes, **summed over topics**: five to `fix.raw`
-  plus five to `fix.orders` (3 × `35=D`, 1 × `35=G`, 1 × `35=F`). One message on
-  two topics is two publishes.
+* **`accepted=16`** — every inbound message, admin included: fifteen application
+  messages plus the `Logon` (the `Logout` a second later makes it 17). Admin
+  messages are counted and then skipped, because
+  `bridge.publish-admin-messages` is `false`.
+* **`published=40`** — publishes, **summed over topics**: fifteen to `fix.raw`,
+  five to `fix.orders` (3 × `35=D`, 1 × `35=G`, 1 × `35=F` — three separate
+  routes, which is why the topic appears three times in the list), ten to
+  `fix.execs` and ten to `fix.order.state`. One message on three topics is three
+  publishes.
 * **`dropped=0 unroutable=0 lost=0 pending=0`** — the three ways a message can
-  fail to arrive, and the backlog. All zero: nothing was lost and the ring is
-  drained.
-
-`fix.execs` and `fix.order.state` stay at zero for the same reason step 3
-reported no execution reports: there is no `35=8` in this direction.
+  fail to arrive, and the backlog. All zero: nothing was lost, every `35=8`
+  carried both tag 17 and tag 37, and the ring is drained.
 
 ### 4. Did it arrive?
 
@@ -473,30 +497,63 @@ reported no execution reports: there is no `35=8` in this direction.
 
 ```
 SOW fix.orders on tcp://localhost:9007/amps/fix
-  [1] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|52=20260907-20:07:14.151|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=106|
-  [2] 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=070|
-  [3] 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=121|
-  [4] 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=141|
-  [5] 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=017|
+  [1] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|52=20260907-22:34:11.092|56=ARTIO|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|59=0|60=…|10=112|
+  [2] 8=FIX.4.2|9=129|35=D|34=5|49=QFJ|52=20260907-22:34:11.095|56=ARTIO|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|59=0|60=…|10=082|
+  [3] 8=FIX.4.2|9=130|35=D|34=8|49=QFJ|52=20260907-22:34:11.098|56=ARTIO|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|59=0|60=…|10=141|
+  [4] 8=FIX.4.2|9=135|35=G|34=12|49=QFJ|52=20260907-22:34:11.102|56=ARTIO|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|54=1|55=MSFT|60=…|10=176|
+  [5] 8=FIX.4.2|9=115|35=F|34=15|49=QFJ|52=20260907-22:34:11.103|56=ARTIO|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|60=…|10=056|
 5 record(s) in fix.orders
 ```
 
 **Five records for three orders**, and that is the design. `fix.orders` is
 keyed on `/11` (`ClOrdID`), and a cancel/replace or a cancel carries a *new*
 `ClOrdID` with the previous one in tag 41 — so the topic holds one record per
-*request*, which is the audit shape and is robust to out-of-order arrival.
+*request*, which is the audit shape and is robust to out-of-order arrival. The
+sequence numbers 2, 5, 8, 12, 15 are the gaps where the execution reports went;
+they carry the same `ClOrdID`s but only `35=D`, `35=G` and `35=F` are routed
+here.
 
 Compare the bytes with what QuickFIX/J printed in step 3: identical, checksum
 included. AMPS stores a FIX payload verbatim; nothing on this path re-encodes.
 
-`fix.execs` and `fix.order.state` are empty, as the counters said:
+`fix.execs` holds all ten reports, one per `ExecID`:
+
+```bash
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.execs"
+```
 
 ```
 SOW fix.execs on tcp://localhost:9007/amps/fix
-0 record(s) in fix.execs
-SOW fix.order.state on tcp://localhost:9007/amps/fix
-0 record(s) in fix.order.state
+  [1] 8=FIX.4.2|9=159|35=8|34=3|49=QFJ|…|6=0|11=ORD-1|14=0|17=EXEC-1|20=0|37=ORDER-1|38=100|39=0|54=1|55=MSFT|60=…|150=0|151=100|10=089|
+  [2] 8=FIX.4.2|9=180|35=8|34=4|49=QFJ|…|6=101.25|11=ORD-1|14=50|17=EXEC-2|20=0|31=101.25|32=50|37=ORDER-1|38=100|39=1|…|150=1|151=50|10=042|
+  …
+  [9] 8=FIX.4.2|9=184|35=8|34=14|49=QFJ|…|6=101.5833|11=ORD-4|14=150|17=EXEC-9|20=0|31=101.75|32=100|37=ORDER-1|38=150|39=2|…|150=2|151=0|10=247|
+  [10] 8=FIX.4.2|9=174|35=8|34=16|49=QFJ|…|6=102.5|11=ORD-5|14=100|17=EXEC-10|20=0|37=ORDER-2|38=200|39=4|41=ORD-2|…|150=4|151=0|10=101|
+10 record(s) in fix.execs
 ```
+
+And `fix.order.state`, keyed on `/37`, is the one the whole routing table exists
+for: **ten publishes, three records**, one per order, each overwritten in place
+as its order progressed.
+
+```bash
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.order.state"
+```
+
+```
+SOW fix.order.state on tcp://localhost:9007/amps/fix
+  [1] 8=FIX.4.2|9=184|35=8|34=14|49=QFJ|…|6=101.5833|11=ORD-4|14=150|17=EXEC-9|20=0|31=101.75|32=100|37=ORDER-1|38=150|39=2|…|150=2|151=0|10=247|
+  [2] 8=FIX.4.2|9=174|35=8|34=16|49=QFJ|…|6=102.5|11=ORD-5|14=100|17=EXEC-10|20=0|37=ORDER-2|38=200|39=4|41=ORD-2|…|150=4|151=0|10=101|
+  [3] 8=FIX.4.2|9=182|35=8|34=11|49=QFJ|…|6=103.75|11=ORD-3|14=300|17=EXEC-7|20=0|31=103.75|32=150|37=ORDER-3|38=300|39=2|…|150=2|151=0|10=137|
+3 record(s) in fix.order.state
+```
+
+`ORDER-1` reads `39=2` Filled — it was acknowledged, half filled, amended and
+completed, and only the last of its four reports survives. `ORDER-2` reads
+`39=4` Canceled with `14=100` still on it, because it traded 100 of its 200
+before the cancel. `ORDER-3` reads Filled. Three orders, three records, the
+current state of each: that is what a SOW key is for, and until the reports were
+scripted into the scenario nothing in this repository demonstrated it.
 
 ### 5. The tape
 
@@ -508,16 +565,16 @@ SOW fix.order.state on tcp://localhost:9007/amps/fix
 journal replay of fix.raw on tcp://localhost:9007/amps/fix from the epoch
   [1] 8=FIX.4.2|…|35=D|…|11=ORD-1|…|60=20260907-02:56:16.803|10=126|
   …
-  [21] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|52=20260907-20:07:14.151|56=ARTIO|11=ORD-1|…|10=106|
-  [22] 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-2|…|10=070|
-  [23] 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-3|…|10=121|
-  [24] 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-4|…|10=141|
-  [25] 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|52=20260907-20:07:14.152|56=ARTIO|11=ORD-5|…|10=017|
-25 message(s) in the fix.raw journal
+  [41] 8=FIX.4.2|9=135|35=G|34=12|49=QFJ|52=20260907-22:34:11.102|56=ARTIO|11=ORD-4|…|10=176|
+  [42] 8=FIX.4.2|9=175|35=8|34=13|49=QFJ|52=20260907-22:34:11.102|56=ARTIO|…|17=EXEC-8|…|37=ORDER-1|…|150=5|151=100|10=157|
+  [43] 8=FIX.4.2|9=184|35=8|34=14|49=QFJ|52=20260907-22:34:11.103|56=ARTIO|6=101.5833|…|17=EXEC-9|…|150=2|151=0|10=247|
+  [44] 8=FIX.4.2|9=115|35=F|34=15|49=QFJ|52=20260907-22:34:11.103|56=ARTIO|11=ORD-5|…|10=056|
+  [45] 8=FIX.4.2|9=174|35=8|34=16|49=QFJ|52=20260907-22:34:11.103|56=ARTIO|…|17=EXEC-10|…|39=4|41=ORD-2|…|150=4|151=0|10=101|
+45 message(s) in the fix.raw journal
 ```
 
-**Twenty-five, not five** — this was the fifth run against the same data
-directory. `amps.sh down` removes the container and leaves
+**Forty-five, not fifteen** — this data directory had earlier runs in it.
+`amps.sh down` removes the container and leaves
 `amps-server/data/<flow>/` alone, so the journal accumulates across
 start/down cycles. That is the point of a tape, and it is also the thing to
 know before asserting on a count by hand: delete the data directory while AMPS
@@ -537,11 +594,11 @@ kill $(pgrep -f com.demo.artio.boot.ArtioBridgeApplication)
 ```
 
 ```
-INFO  ArtioRuntime              bridge-acceptor-52239-1 closed
+INFO  ArtioRuntime              bridge-acceptor-81490-1 closed
 INFO  ArtioRuntimeLifecycle     artio runtime closed
-INFO  AmpsFixPublisher          bridge closed: accepted=7 published=10 pending=0 dropped=0 unroutable=0
-                                errors=0 lost=0 bytes=1504 ring=0/4194304 DISCONNECTED […]
-INFO  BridgePublisherLifecycle  amps publisher drained and flushed: accepted=7 published=10 pending=0 …
+INFO  AmpsFixPublisher          bridge closed: accepted=17 published=40 pending=0 dropped=0 unroutable=0
+                                errors=0 lost=0 bytes=7409 ring=0/4194304 DISCONNECTED […]
+INFO  BridgePublisherLifecycle  amps publisher drained and flushed: accepted=17 published=40 pending=0 …
 ```
 
 **Those two lines, in that order, are what to check**: engine closed *first*, so

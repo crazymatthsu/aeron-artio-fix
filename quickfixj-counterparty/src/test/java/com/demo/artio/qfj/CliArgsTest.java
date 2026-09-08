@@ -2,6 +2,8 @@ package com.demo.artio.qfj;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,7 +32,38 @@ class CliArgsTest
             () -> assertEquals("QFJ", args.senderCompId()),
             () -> assertEquals("ARTIO", args.targetCompId()),
             () -> assertTrue(args.runScenario()),
+            () -> assertEquals(CliArgs.Scenario.DROP_COPY, args.scenario(),
+                "'orders' is the whole drop copy stream; the spelling in the README still works"),
             () -> assertFalse(args.screenLog()));
+    }
+
+    @Test
+    void theThreeScenarioSpellingsSelectTheThreeStreams()
+    {
+        assertAll(
+            () -> assertEquals(CliArgs.Scenario.DROP_COPY,
+                CliArgs.parse(words("initiator --port 1 --scenario orders")).scenario()),
+            () -> assertEquals(CliArgs.Scenario.DROP_COPY,
+                CliArgs.parse(words("initiator --port 1 --scenario drop-copy")).scenario(),
+                "a synonym of 'orders' that says what the stream is"),
+            () -> assertEquals(CliArgs.Scenario.ORDERS_ONLY,
+                CliArgs.parse(words("initiator --port 1 --scenario orders-only")).scenario()),
+            () -> assertEquals(CliArgs.Scenario.NONE,
+                CliArgs.parse(words("initiator --port 1 --scenario none")).scenario()),
+            () -> assertFalse(CliArgs.parse(words("initiator --port 1 --scenario none")).runScenario()),
+            () -> assertTrue(CliArgs.parse(words("initiator --port 1 --scenario DROP-COPY")).runScenario(),
+                "the name is case insensitive"));
+    }
+
+    @Test
+    void eachScenarioNamesTheStepsItSends()
+    {
+        assertAll(
+            () -> assertEquals(List.of(), CliArgs.Scenario.NONE.steps()),
+            () -> assertEquals(OrderScenario.MESSAGE_COUNT, CliArgs.Scenario.DROP_COPY.steps().size()),
+            () -> assertEquals(OrderScenario.DEFAULT.steps(), CliArgs.Scenario.DROP_COPY.steps()),
+            () -> assertEquals(OrderScenario.ORDERS_ONLY, CliArgs.Scenario.ORDERS_ONLY.steps()),
+            () -> assertEquals(OrderScenario.ORDER_COUNT, CliArgs.Scenario.ORDERS_ONLY.steps().size()));
     }
 
     @Test
@@ -147,6 +180,8 @@ class CliArgsTest
         assertAll(
             () -> assertTrue(message.contains("chaos"), message),
             () -> assertTrue(message.contains("orders"), message),
+            () -> assertTrue(message.contains("drop-copy"), message),
+            () -> assertTrue(message.contains("orders-only"), message),
             () -> assertTrue(message.contains("none"), message));
     }
 

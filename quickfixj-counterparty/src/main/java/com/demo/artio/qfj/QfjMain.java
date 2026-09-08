@@ -16,16 +16,21 @@ import java.util.concurrent.CountDownLatch;
  *     --sender QFJ --target ARTIO"
  * </pre>
  *
- * Every message sent or received is printed with SOH shown as {@code |}. The initiator exits when
- * its scenario has run and the replies have stopped arriving; the acceptor runs until Ctrl-C.
+ * Every message sent or received is printed with SOH shown as {@code |}. The initiator sends a drop
+ * copy stream - order events and the execution reports they produced - and exits once it has been
+ * sent and it has reported what went out; the acceptor runs until Ctrl-C.
  */
 public final class QfjMain
 {
     /** How long to wait for the session to log on before giving up. */
     private static final Duration LOGON_TIMEOUT = Duration.ofSeconds(30);
 
-    /** How long to wait for execution reports after the scenario has been sent. */
-    private static final Duration REPLY_TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * How long to wait after the scenario has been sent, for the one peer that answers - this
+     * module's own acceptor mode. Short: a drop copy consumer answers nothing, and the run is over
+     * either way.
+     */
+    private static final Duration REPLY_TIMEOUT = Duration.ofSeconds(3);
 
     /** Exit code when the command line could not be parsed or describes an invalid configuration. */
     public static final int EXIT_BAD_ARGUMENTS = 2;
@@ -126,16 +131,32 @@ public final class QfjMain
 
                 if (args.runScenario())
                 {
-                    final List<String> clOrdIds = initiator.run(OrderScenario.DEFAULT);
+                    final List<OrderScenario.Step> steps = args.scenario().steps();
+                    final List<String> clOrdIds = initiator.run(steps);
+                    final List<String> execIds = steps.stream()
+                        .filter(OrderScenario.Report.class::isInstance)
+                        .map(step -> ((OrderScenario.Report)step).execId())
+                        .toList();
+
+                    // This is a drop copy session: what goes out is a COPY of an order session's
+                    // traffic, and the peer is a consumer, not a venue. So the interesting number is
+                    // what was sent, not what came back - an Artio acceptor receives all of it,
+                    // publishes it to AMPS and correctly answers nothing.
                     out.println("== sent scenario: " + clOrdIds);
-                    // A counterparty that answers (the QuickFIX/J acceptor) sends two reports per new
-                    // order plus one each for the replace and the cancel. One that does not (a bare
-                    // Artio acceptor with a sink that only records) sends none, which is not an error.
-                    final int expectedReports = 8;
-                    initiator.awaitReceived(Tags.MSG_TYPE_EXECUTION_REPORT, expectedReports, REPLY_TIMEOUT);
-                    out.println("== received " +
-                        initiator.receivedMessages(Tags.MSG_TYPE_EXECUTION_REPORT).size() +
-                        " execution report(s) of an expected " + expectedReports);
+                    out.println("== sent " + steps.size() + " message(s): " + clOrdIds.size() +
+                        " order event(s) and " + execIds.size() + " execution report(s)" +
+                        (execIds.isEmpty() ? "" : ' ' + execIds.toString()));
+
+                    // The one peer that does answer is this module's own acceptor mode, which is a
+                    // venue: two reports per new order and one each for the replace and the cancel.
+                    // The wait is short because nothing depends on it.
+                    initiator.awaitReceived(Tags.MSG_TYPE_EXECUTION_REPORT, answerableBy(steps), REPLY_TIMEOUT);
+                    final int answers = initiator.receivedMessages(Tags.MSG_TYPE_EXECUTION_REPORT).size();
+                    out.println(answers == 0 ?
+                        "== the peer answered with no execution reports, which is what a drop copy " +
+                            "consumer does" :
+                        "== the peer answered with " + answers + " execution report(s): it is a venue, " +
+                            "not a drop copy consumer");
                     return 0;
                 }
 
@@ -148,6 +169,28 @@ public final class QfjMain
                 hook.uninstall();
             }
         }
+    }
+
+    /**
+     * @param steps the steps that were sent.
+     * @return how many execution reports a <em>venue</em> would answer them with: two per new order
+     *         - an acknowledgement and a fill - and one each for a replace and a cancel. A drop copy
+     *         consumer answers none, and an execution report is answered by nobody.
+     */
+    private static int answerableBy(final List<OrderScenario.Step> steps)
+    {
+        int answers = 0;
+        for (final OrderScenario.Step step : steps)
+        {
+            answers += switch (step)
+            {
+                case OrderScenario.NewOrder ignored -> 2;
+                case OrderScenario.Replace ignored -> 1;
+                case OrderScenario.Cancel ignored -> 1;
+                case OrderScenario.Report ignored -> 0;
+            };
+        }
+        return answers;
     }
 
     private static int runAcceptor(

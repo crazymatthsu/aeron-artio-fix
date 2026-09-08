@@ -66,25 +66,63 @@ amps-server/scripts/amps.sh start                 # AMPS in podman, artio-fix fl
     --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
 
 ./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.execs"
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.order.state"
 ./gradlew :artio-amps-bridge:sowDump --args="--replay fix.raw"
 
 amps-server/scripts/amps.sh down
 ```
 
-`sowDump --topic fix.orders` after the scenario prints five records, one per `ClOrdID`:
+The counterparty sends a **drop copy** stream: five order events and the ten `35=8` execution
+reports they produced. Fifteen messages become forty publishes and eighteen records — real counters
+from a run on 2026-09-07:
+
+```
+StatsLogger  stats: accepted=17 published=40 pending=0 dropped=0 unroutable=0 errors=0 lost=0
+             bytes=7409 ring=0/4194304 connected [fix.raw={published=15}, fix.orders={published=3},
+             fix.orders={published=1}, fix.orders={published=1}, fix.execs={published=10},
+             fix.order.state={published=10}]
+```
+
+| Topic | SOW key | Publishes | Records |
+| :-- | :-- | --: | --: |
+| `fix.raw` | none, journalled | 15 | n/a |
+| `fix.orders` | `/11` | 5 | 5 |
+| `fix.execs` | `/17` | 10 | 10 |
+| `fix.order.state` | `/37` | 10 | 3 |
+
+`sowDump --topic fix.orders` prints five records, one per `ClOrdID`:
 
 ```
 SOW fix.orders on tcp://localhost:9007/amps/fix
-  [1] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|...|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|...
-  [2] 8=FIX.4.2|9=129|35=D|34=3|49=QFJ|...|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|...
-  [3] 8=FIX.4.2|9=130|35=D|34=4|49=QFJ|...|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|...
-  [4] 8=FIX.4.2|9=134|35=G|34=5|49=QFJ|...|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|...
-  [5] 8=FIX.4.2|9=114|35=F|34=6|49=QFJ|...|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|...
+  [1] 8=FIX.4.2|9=130|35=D|34=2|49=QFJ|…|11=ORD-1|21=1|38=100|40=2|44=101.25|54=1|55=MSFT|…
+  [2] 8=FIX.4.2|9=129|35=D|34=5|49=QFJ|…|11=ORD-2|21=1|38=200|40=2|44=102.5|54=1|55=MSFT|…
+  [3] 8=FIX.4.2|9=130|35=D|34=8|49=QFJ|…|11=ORD-3|21=1|38=300|40=2|44=103.75|54=1|55=MSFT|…
+  [4] 8=FIX.4.2|9=135|35=G|34=12|49=QFJ|…|11=ORD-4|21=1|38=150|40=2|41=ORD-1|44=101.75|…
+  [5] 8=FIX.4.2|9=115|35=F|34=15|49=QFJ|…|11=ORD-5|38=200|41=ORD-2|54=1|55=MSFT|…
 5 record(s) in fix.orders
 ```
 
 Five, not three: a cancel/replace carries a **new** `ClOrdID` and the previous one in tag 41, so a
-topic keyed on `/11` holds one record per *request*, which is the audit shape.
+topic keyed on `/11` holds one record per *request*, which is the audit shape. The ten reports carry
+those same `ClOrdID`s, and none of them lands here — only `35=D`, `35=G` and `35=F` are routed to
+`fix.orders`.
+
+`fix.execs` holds all ten, one per `ExecID`. `fix.order.state` is the interesting one: ten publishes
+keyed on `/37` collapse into **three** records, one per order, each the latest state that order
+reached:
+
+```
+SOW fix.order.state on tcp://localhost:9007/amps/fix
+  [1] 8=FIX.4.2|…|35=8|…|6=101.5833|11=ORD-4|14=150|17=EXEC-9|20=0|31=101.75|32=100|37=ORDER-1|38=150|39=2|…|150=2|151=0|…
+  [2] 8=FIX.4.2|…|35=8|…|6=102.5|11=ORD-5|14=100|17=EXEC-10|20=0|37=ORDER-2|38=200|39=4|41=ORD-2|…|150=4|151=0|…
+  [3] 8=FIX.4.2|…|35=8|…|6=103.75|11=ORD-3|14=300|17=EXEC-7|20=0|31=103.75|32=150|37=ORDER-3|38=300|39=2|…|150=2|151=0|…
+3 record(s) in fix.order.state
+```
+
+`ORDER-1` reads Filled (`39=2`, after being amended), `ORDER-2` Canceled (`39=4`, with the 100 it
+traded before the cancel still in `14`), `ORDER-3` Filled. That is what the topic exists to show:
+an order record overwritten in place as the order progresses.
 
 `Ctrl-C` (or `kill -TERM`) stops the bridge cleanly: it logs the counterparty out, drains the ring
 buffer, flushes AMPS and disconnects, printing the final counters. Gradle then reports the `run`
@@ -224,7 +262,7 @@ on the `application` start script. Any process that embeds `AmpsFixPublisher` ne
 | `AmpsClientPortTest` | reconnect: back-off doubling to its ceiling, one connect per interval rather than per message, a non-disconnect failure staying an error, one `Store` reused across clients, a stable name when the store is on, a disconnect first noticed in `flush()` counted as a reconnect, close |
 | `SowDumpTest` | the CLI's exit codes and argument handling, including `--filter` reaching `--replay` |
 | `BridgeMainTest` | the shutdown-hook budget derived from the engine and bridge timeouts |
-| `BridgeOrderFlowIT` | the whole path on FIX 4.2 **and** 4.4: QuickFIX/J → Artio → ring buffer → AMPS, one SOW record per `ClOrdID`, five on the journal, `fix.execs` and `fix.order.state` empty, every counter |
+| `BridgeOrderFlowIT` | the whole path on FIX 4.2 **and** 4.4: QuickFIX/J → Artio → ring buffer → AMPS, fifteen messages on the journal, one SOW record per `ClOrdID` (5), one per `ExecID` (10), one per `OrderID` (3, each holding the order's final state), and every counter |
 | `BridgeRoutingAgainstAmpsIT` | the `Logon` on `fix.admin` (seen through a live subscription, because the topic has no SOW and no journal), and a `35=8` with no tag 37 reaching `fix.execs` and the tape but **not** `fix.order.state` |
 
 The integration suite needs podman and the AMPS image; it skips with a reason when either is

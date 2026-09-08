@@ -56,6 +56,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SpringApplicationOrderFlowIT
 {
+    /** 15 on fix.raw + 5 on fix.orders + 10 on fix.execs + 10 on fix.order.state. */
+    private static final long EXPECTED_PUBLISHES = OrderScenario.MESSAGE_COUNT +
+        OrderScenario.ORDER_COUNT + 2L * OrderScenario.EXECUTION_REPORT_COUNT;
+
     private static AmpsComposeServer amps;
 
     @BeforeAll
@@ -130,9 +134,10 @@ class SpringApplicationOrderFlowIT
 
                 clOrdIds = qfj.run(scenario);
 
-                // Five application messages, each on fix.raw and on fix.orders.
+                // Fifteen application messages on fix.raw, the five order events again on
+                // fix.orders, and the ten reports on fix.execs and fix.order.state: forty publishes.
                 await().atMost(SpringItSupport.MESSAGE_TIMEOUT)
-                    .until(() -> publisher.stats().published() >= 2L * OrderScenario.MESSAGE_COUNT);
+                    .until(() -> publisher.stats().published() >= EXPECTED_PUBLISHES);
             }
             statsBeforeClose = publisher.stats();
             // The edge that orders bean destruction on the one path the phases do not cover (a
@@ -165,9 +170,12 @@ class SpringApplicationOrderFlowIT
         final BridgeStats stats = publisher.stats();
         assertAll(
             () -> assertEquals(OrderScenario.MESSAGE_COUNT, stats.publishedTo(BridgeConfig.TOPIC_RAW)),
-            () -> assertEquals(OrderScenario.MESSAGE_COUNT, stats.publishedTo(BridgeConfig.TOPIC_ORDERS)),
-            () -> assertEquals(0, stats.publishedTo(BridgeConfig.TOPIC_EXECS)),
-            () -> assertEquals(0, stats.publishedTo(BridgeConfig.TOPIC_ORDER_STATE)),
+            () -> assertEquals(OrderScenario.ORDER_COUNT, stats.publishedTo(BridgeConfig.TOPIC_ORDERS)),
+            () -> assertEquals(OrderScenario.EXECUTION_REPORT_COUNT,
+                stats.publishedTo(BridgeConfig.TOPIC_EXECS)),
+            () -> assertEquals(OrderScenario.EXECUTION_REPORT_COUNT,
+                stats.publishedTo(BridgeConfig.TOPIC_ORDER_STATE)),
+            () -> assertEquals(EXPECTED_PUBLISHES, stats.published()),
             () -> assertEquals(0, stats.dropped(), "the ring buffer never filled"),
             () -> assertEquals(0, stats.unroutable(), "every message carried its topic's SOW key"),
             () -> assertEquals(0, stats.publishErrors()),

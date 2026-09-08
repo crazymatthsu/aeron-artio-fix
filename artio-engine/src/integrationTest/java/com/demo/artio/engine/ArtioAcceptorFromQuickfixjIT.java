@@ -130,13 +130,21 @@ class ArtioAcceptorFromQuickfixjIT
         }
     }
 
+    /**
+     * The drop copy stream: fifteen application messages, ten of them {@code 35=8}, all of them sent
+     * by the counterparty and none of them answered. Artio is the consumer here, so what this pins
+     * down is that its FIX 4.2 and FIX 4.4 codecs accept an {@code ExecutionReport} built by another
+     * engine and hand every field of it to the sink unchanged - which is what the AMPS bridge's
+     * {@code fix.execs} and {@code fix.order.state} routes then key on.
+     */
     @ParameterizedTest(name = "{0}")
     @EnumSource(FixVersion.class)
-    void thePlannedOrderScenarioArrivesAsThreeNewOrdersAReplaceAndACancel(final FixVersion version)
-        throws Exception
+    void theDropCopyScenarioArrivesAsFifteenApplicationMessagesWithTheirReportsIntact(
+        final FixVersion version) throws Exception
     {
         final int port = ItSupport.freePort();
         final CountingSink sink = new CountingSink();
+        final OrderScenario scenario = OrderScenario.DEFAULT;
 
         try (ArtioRuntime runtime = ArtioRuntime.launch(acceptorConfig(version, port), sink, null);
             QfjInitiator qfj = new QfjInitiator(initiatorConfig(version, port)))
@@ -144,7 +152,7 @@ class ArtioAcceptorFromQuickfixjIT
             qfj.start();
             assertTrue(qfj.awaitLogon(ItSupport.STARTUP_TIMEOUT), "QuickFIX/J did not log on to Artio");
 
-            final List<String> clOrdIds = qfj.run(OrderScenario.DEFAULT);
+            final List<String> clOrdIds = qfj.run(scenario);
 
             await().atMost(ItSupport.MESSAGE_TIMEOUT)
                 .until(() -> sink.applicationCount() == OrderScenario.MESSAGE_COUNT);
@@ -152,12 +160,35 @@ class ArtioAcceptorFromQuickfixjIT
             final List<CountingSink.Captured> application = sink.messages().stream()
                 .filter(message -> !message.admin())
                 .toList();
+            final List<CountingSink.Captured> reports = application.stream()
+                .filter(message -> "8".equals(message.msgType()))
+                .toList();
             assertAll(
-                () -> assertEquals(List.of("D", "D", "D", "G", "F"),
+                () -> assertEquals(scenario.msgTypes(),
                     application.stream().map(CountingSink.Captured::msgType).toList()),
-                () -> assertEquals(clOrdIds, application.stream().map(m -> m.field(11)).toList()),
-                () -> assertEquals("ORD-1", application.get(3).field(41)),
-                () -> assertEquals("ORD-2", application.get(4).field(41)),
+                () -> assertEquals(scenario.steps().stream().map(OrderScenario.Step::clOrdId).toList(),
+                    application.stream().map(m -> m.field(11)).toList()),
+                () -> assertEquals(scenario.clOrdIds(), clOrdIds,
+                    "run() reports the five order events; the reports repeat their ClOrdIDs"),
+                () -> assertTrue(application.stream().allMatch(CountingSink.Captured::valid),
+                    "Artio rejected a message it should have accepted"),
+                // The replace and the cancel reference earlier orders, and so do their reports.
+                () -> assertEquals("ORD-1", application.get(10).field(41)),
+                () -> assertEquals("ORD-1", application.get(11).field(41)),
+                () -> assertEquals("ORD-2", application.get(13).field(41)),
+                () -> assertEquals("ORD-2", application.get(14).field(41)),
+                // Everything the bridge's two 35=8 routes need, as it came off the session.
+                () -> assertEquals(OrderScenario.EXECUTION_REPORT_COUNT, reports.size()),
+                () -> assertEquals(scenario.execIds(), reports.stream().map(m -> m.field(17)).toList()),
+                () -> assertEquals(
+                    List.of("ORDER-1", "ORDER-1", "ORDER-2", "ORDER-2", "ORDER-3",
+                        "ORDER-3", "ORDER-3", "ORDER-1", "ORDER-1", "ORDER-2"),
+                    reports.stream().map(m -> m.field(37)).toList(),
+                    "an order keeps one OrderID, which is what fix.order.state is keyed on"),
+                () -> assertEquals(List.of("0", "1", "0", "1", "0", "1", "2", "1", "2", "4"),
+                    reports.stream().map(m -> m.field(39)).toList(), "OrdStatus does not vary by version"),
+                () -> assertEquals("101.5833", reports.get(8).field(6),
+                    "the quantity-weighted average of both fills of ORD-1, not the last price"),
                 () -> assertFalse(runtime.logonLatency().isPresent(),
                     "an acceptor does not drive the logon, so it measures no logon latency"));
         }

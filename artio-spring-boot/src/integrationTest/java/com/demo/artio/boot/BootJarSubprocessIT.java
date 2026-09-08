@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <ul>
  *   <li>the jar is launched with {@code java -jar} and the three module flags Artio and Aeron need
  *       - the fat jar has nowhere else to get them from;</li>
- *   <li>the counterparty runs the same five-message scenario;</li>
+ *   <li>the counterparty runs the same fifteen-message drop copy scenario;</li>
  *   <li>the process is sent SIGTERM ({@link Process#destroy()}), which is what {@code docker stop},
  *       Kubernetes and Ctrl-C all send, and the assertions are on what the dying process managed to
  *       flush and on the order its log says it did it in.</li>

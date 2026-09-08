@@ -131,8 +131,10 @@ it end to end with real output. In brief, one process at a time from the reposit
 ./gradlew :artio-spring-boot:bootRun                          # acceptor on 9880 + the AMPS bridge
 ./gradlew :quickfixj-counterparty:run --args="initiator --host localhost --port 9880 \
     --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
-./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"   # 5 records, keyed by ClOrdID
-./gradlew :artio-amps-bridge:sowDump --args="--replay fix.raw"     # the journal
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"        # 5 records, keyed by ClOrdID
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.execs"         # 10, keyed by ExecID
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.order.state"   # 3, keyed by OrderID
+./gradlew :artio-amps-bridge:sowDump --args="--replay fix.raw"          # the journal
 # Ctrl-C the bootRun (Gradle reports exit 143; that is SIGTERM, not a failure)
 amps-server/scripts/amps.sh down
 ```
@@ -140,10 +142,25 @@ amps-server/scripts/amps.sh down
 `./gradlew :artio-amps-bridge:run` is the same flow without Spring. The AMPS admin UI is at
 <http://localhost:8085/>.
 
-Two results in that run surprise people, and both are correct: **five SOW records for three
-orders** (a cancel/replace carries a new `ClOrdID`, so `fix.orders` holds one record per *request*),
-and **zero execution reports** (an Artio gateway receives and republishes; it does not book or fill —
-point the initiator at `quickfixj-counterparty acceptor` to see the eight replies).
+The counterparty is a **drop copy** session: it sends copies of an order session's traffic — three
+new orders, an amend, a cancel and the ten `35=8` execution reports those orders produced — and the
+Artio acceptor receives them, publishes them to AMPS and correctly answers nothing. Fifteen
+messages become forty publishes and eighteen records:
+
+| Topic | SOW key | Publishes | Records |
+| :-- | :-- | --: | --: |
+| `fix.raw` | none, journalled | 15 | n/a |
+| `fix.orders` | `/11` ClOrdID | 5 | 5 |
+| `fix.execs` | `/17` ExecID | 10 | 10 |
+| `fix.order.state` | `/37` OrderID | 10 | 3 |
+
+Three results in that run surprise people, and all three are correct: **five `fix.orders` records
+for three orders** (a cancel/replace carries a new `ClOrdID`, so the topic holds one record per
+*request*); **ten publishes but three records on `fix.order.state`** (that is what the `/37` keying
+is for — after the run `ORDER-1` reads Filled, `ORDER-2` Canceled, `ORDER-3` Filled); and **nothing
+coming back** (an Artio gateway receives and republishes; it does not book or fill — point the
+initiator at `quickfixj-counterparty acceptor` to see a venue answer the order events with eight
+replies).
 
 ## The three JVM flags
 
@@ -188,7 +205,7 @@ lets a previous all-skipped run be restored as `FROM-CACHE`. Asking for the task
 | `fix-dictionary` | 81 | — |
 | `fix-codecs` | 12 | — |
 | `artio-engine` | 54 | 44 |
-| `quickfixj-counterparty` | 65 | 12 |
+| `quickfixj-counterparty` | 84 | 12 |
 | `amps-test-harness` | 37 | 11 |
 | `artio-amps-bridge` | 85 | 4 |
 | `artio-spring-boot` | 37 | 3 |
@@ -204,6 +221,7 @@ lets a previous all-skipped run be restored as `FROM-CACHE`. Asking for the task
 | [`docs/04-spring-boot-feasibility.md`](docs/04-spring-boot-feasibility.md) | can it run under Spring Boot? Yes — with the thread-ownership, lifecycle-ordering and fat-jar constraints spelled out |
 | [`docs/05-integration-testing-and-demo.md`](docs/05-integration-testing-and-demo.md) | how podman compose is driven, readiness detection, the skip rules, and the **demo runbook** with real output |
 | [`docs/06-code-review.md`](docs/06-code-review.md) | the review record: 54 findings across five modules, and how each was resolved |
+| [`docs/07-drop-copy-execution-reports.md`](docs/07-drop-copy-execution-reports.md) | why the demo had no `35=8`, the fifteen-message drop copy stream that fixed it, and what it does to the AMPS side |
 | [`docs/aeron_artio_amps_analysis.md`](docs/aeron_artio_amps_analysis.md) | the background analysis this project started from |
 
 ## What was learned

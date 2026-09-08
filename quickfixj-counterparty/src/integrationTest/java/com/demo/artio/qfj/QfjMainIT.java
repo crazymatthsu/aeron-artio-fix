@@ -130,7 +130,15 @@ class QfjMainIT
             assertAll(
                 () -> assertEquals(0, exitCode, () -> "stderr: " + err.toString(StandardCharsets.UTF_8)),
                 () -> assertTrue(output.contains("== sent scenario: [ORD-1, ORD-2, ORD-3, ORD-4, ORD-5]"), output),
-                () -> assertTrue(output.contains("== received 8 execution report(s) of an expected 8"), output),
+                // What it sent, which is the point of a drop copy: fifteen messages, of which ten
+                // are the execution reports.
+                () -> assertTrue(output.contains(
+                    "== sent 15 message(s): 5 order event(s) and 10 execution report(s) " +
+                        "[EXEC-1, EXEC-2, EXEC-3, EXEC-4, EXEC-5, EXEC-6, EXEC-7, EXEC-8, EXEC-9, EXEC-10]"),
+                    output),
+                // This peer is the venue mode of the same module, so it does answer; against an
+                // Artio acceptor the line says "no execution reports", which is not an error.
+                () -> assertTrue(output.contains("== the peer answered with 8 execution report(s)"), output),
                 () -> assertNotNull(hooks.hook.get(), "a hook covers the scenario wait too"),
                 () -> assertEquals(Boolean.FALSE, hooks.engineWasLiveAtRegistration.get(),
                     "registered before start(), so before any logon"),
