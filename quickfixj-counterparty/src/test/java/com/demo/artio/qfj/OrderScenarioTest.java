@@ -16,11 +16,15 @@ class OrderScenarioTest
     private static final OrderScenario SCENARIO = OrderScenario.DEFAULT;
 
     @Test
-    void theScenarioIsThreeNewOrdersOneReplaceAndOneCancel()
+    void theOrderEventsAreThreeNewOrdersOneReplaceAndOneCancel()
     {
+        // The execution reports interleaved between them are DropCopyScenarioTest's subject; this
+        // class is about the order events and the identifiers, which the reports did not change.
         assertAll(
-            () -> assertEquals(OrderScenario.MESSAGE_COUNT, SCENARIO.steps().size()),
-            () -> assertEquals(List.of("D", "D", "D", "G", "F"), SCENARIO.msgTypes()));
+            () -> assertEquals(OrderScenario.ORDER_COUNT, SCENARIO.orderSteps().size()),
+            () -> assertEquals(List.of("D", "D", "D", "G", "F"),
+                SCENARIO.orderSteps().stream().map(OrderScenario.Step::msgType).toList()),
+            () -> assertEquals(OrderScenario.MESSAGE_COUNT, SCENARIO.steps().size()));
     }
 
     @Test
@@ -34,7 +38,7 @@ class OrderScenarioTest
     @Test
     void theReplaceAndTheCancelReferenceTheFirstTwoOrders()
     {
-        final List<OrderScenario.Step> steps = SCENARIO.steps();
+        final List<OrderScenario.Step> steps = SCENARIO.orderSteps();
 
         assertAll(
             () -> assertEquals("ORD-1", ((OrderScenario.Replace)steps.get(3)).origClOrdId()),
@@ -46,7 +50,7 @@ class OrderScenarioTest
     @Test
     void theThreeNewOrdersScaleQuantityAndPriceFromTheBaseValues()
     {
-        final List<OrderScenario.Step> steps = SCENARIO.steps();
+        final List<OrderScenario.Step> steps = SCENARIO.orderSteps();
 
         assertAll(
             () -> assertEquals(100.0, ((OrderScenario.NewOrder)steps.get(0)).qty()),

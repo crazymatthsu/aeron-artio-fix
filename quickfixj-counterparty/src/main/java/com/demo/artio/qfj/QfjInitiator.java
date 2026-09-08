@@ -192,18 +192,32 @@ public final class QfjInitiator implements AutoCloseable
     }
 
     /**
-     * Sends the five messages of a scenario, in order.
+     * Sends the fifteen messages of a scenario's drop copy stream, in order: the five order events
+     * and the ten execution reports they produce.
      *
      * @param scenario the scenario.
-     * @return the {@code ClOrdID}s sent, in order.
+     * @return the five order {@code ClOrdID}s, in the order they were sent; the reports repeat them.
      */
     public List<String> run(final OrderScenario scenario)
     {
-        for (final OrderScenario.Step step : scenario.steps())
+        run(scenario.steps());
+        return scenario.clOrdIds();
+    }
+
+    /**
+     * Sends an explicit list of steps, in order - {@link OrderScenario#ORDERS_ONLY}, say, or any
+     * other slice of a scenario.
+     *
+     * @param steps the steps to send.
+     * @return the distinct {@code ClOrdID}s sent, in first-sent order.
+     */
+    public List<String> run(final List<OrderScenario.Step> steps)
+    {
+        for (final OrderScenario.Step step : steps)
         {
             send(Orders.toMessage(config.version(), step));
         }
-        return scenario.clOrdIds();
+        return steps.stream().map(OrderScenario.Step::clOrdId).distinct().toList();
     }
 
     /**

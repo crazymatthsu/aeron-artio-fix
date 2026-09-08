@@ -57,6 +57,28 @@ public enum QfjVersion
     }
 
     /**
+     * The {@code ExecType(150)} value this version uses for one lifecycle event.
+     *
+     * <p>Only the two trade events differ: FIX 4.2 distinguishes {@code 1} (Partial fill) from
+     * {@code 2} (Fill), while FIX 4.4 replaced both with {@code F} (Trade) and leaves the
+     * distinction to {@code OrdStatus(39)}. The other three are the same character in both.
+     *
+     * @param event the lifecycle event.
+     * @return the {@code ExecType(150)} character to write.
+     */
+    public char execType(final ExecEvent event)
+    {
+        return switch (event)
+        {
+            case ACKNOWLEDGED -> '0';
+            case PARTIALLY_FILLED -> this == FIX42 ? '1' : fillExecType();
+            case FILLED -> fillExecType();
+            case REPLACED -> '5';
+            case CANCELED -> '4';
+        };
+    }
+
+    /**
      * Looks a version up by its {@code BeginString} or its enum name, so both {@code FIX.4.2} and
      * {@code FIX42} work on the command line.
      *
@@ -75,5 +97,28 @@ public enum QfjVersion
         }
         throw new IllegalArgumentException(
             "Unsupported FIX version '" + value + "'; expected one of FIX.4.2, FIX.4.4");
+    }
+
+    /**
+     * What an execution report says happened, named semantically rather than as a wire value: the
+     * character that carries it is version dependent and is {@link QfjVersion#execType(ExecEvent)}'s
+     * business, not the caller's.
+     */
+    public enum ExecEvent
+    {
+        /** The venue acknowledged a new order and is working it. */
+        ACKNOWLEDGED,
+
+        /** Part of the order traded; more is still working. */
+        PARTIALLY_FILLED,
+
+        /** The rest of the order traded; nothing is left. */
+        FILLED,
+
+        /** A cancel/replace was applied to the order. */
+        REPLACED,
+
+        /** The order was cancelled. */
+        CANCELED
     }
 }

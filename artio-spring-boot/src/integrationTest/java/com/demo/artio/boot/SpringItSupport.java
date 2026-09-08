@@ -92,8 +92,9 @@ final class SpringItSupport
     }
 
     /**
-     * Everything the order scenario must have left in AMPS, whichever way the application was
-     * started.
+     * Everything the drop copy stream must have left in AMPS, whichever way the application was
+     * started: fifteen messages become forty publishes, five {@code fix.orders} records, ten
+     * {@code fix.execs} records and three {@code fix.order.state} records (docs/07 section 3).
      *
      * @param uri       the harness AMPS URI.
      * @param scenario  the scenario that was run.
@@ -110,11 +111,12 @@ final class SpringItSupport
         assertEquals(scenario.clOrdIds(), clOrdIds, "the counterparty sent what the scenario says");
 
         // One SOW record per ClOrdID, found by the SOW key itself. A cancel/replace carries a NEW
-        // tag 11 with the previous one in 41, so five requests are five records, not three.
+        // tag 11 with the previous one in 41, so five requests are five records, not three. The ten
+        // reports repeat those ClOrdIDs but only D, G and F are routed here, so they add none.
         for (int i = 0; i < clOrdIds.size(); i++)
         {
             final String clOrdId = clOrdIds.get(i);
-            final String expectedType = scenario.msgTypes().get(i);
+            final String expectedType = scenario.orderSteps().get(i).msgType();
             final List<String> records =
                 SowReader.query(uri, BridgeConfig.TOPIC_ORDERS, "/11 = '" + clOrdId + "'");
 
@@ -135,13 +137,51 @@ final class SpringItSupport
         // fix.raw is journalled and cumulative: measure what this run added.
         final long rawAfter = SowReader.countFromEpoch(uri, BridgeConfig.TOPIC_RAW, Duration.ofSeconds(3));
         assertEquals(OrderScenario.MESSAGE_COUNT, rawAfter - rawBefore,
-            "the journal holds the five application messages and no session-level ones");
+            "the journal holds the fifteen application messages and no session-level ones");
 
-        // Nothing in either test ever sends an execution report, and only a 35=8 is routed to
-        // either of these. A record here would be a routing bug.
+        // One fix.execs record per ExecID. Absolute rather than a delta: each test class starts its
+        // own container on an emptied data directory, and the two classes run the same scenario, so
+        // even if they shared one the ten ExecIDs would overwrite rather than accumulate.
+        assertEquals(OrderScenario.EXECUTION_REPORT_COUNT,
+            SowReader.query(uri, BridgeConfig.TOPIC_EXECS).size(), "one fix.execs record per ExecID");
+        for (final String execId : scenario.execIds())
+        {
+            final List<String> records = SowReader.query(uri, BridgeConfig.TOPIC_EXECS, "/17 = '" + execId + "'");
+            assertEquals(1, records.size(), () -> "expected exactly one fix.execs record for " + execId);
+            assertEquals("8", field(records.get(0), 35),
+                () -> "only a 35=8 belongs on fix.execs: " + SowReader.printable(records.get(0)));
+        }
+
+        // And the reason fix.order.state exists: ten publishes, three records, each the latest state
+        // of one order. ORDER-1 was amended then completed, ORDER-2 cancelled after a partial fill,
+        // ORDER-3 filled on its own.
+        assertEquals(3, SowReader.query(uri, BridgeConfig.TOPIC_ORDER_STATE).size(),
+            "ten publishes collapse into one record per OrderID");
         assertAll(
-            () -> assertEquals(List.of(), SowReader.query(uri, BridgeConfig.TOPIC_EXECS)),
-            () -> assertEquals(List.of(), SowReader.query(uri, BridgeConfig.TOPIC_ORDER_STATE)));
+            () -> assertEquals("2", orderState(uri, "ORDER-1", 39), "ORDER-1 reads Filled"),
+            () -> assertEquals("4", orderState(uri, "ORDER-2", 39), "ORDER-2 reads Canceled"),
+            () -> assertEquals("2", orderState(uri, "ORDER-3", 39), "ORDER-3 reads Filled"),
+            () -> assertEquals("EXEC-9", orderState(uri, "ORDER-1", 17),
+                "the record is the last report for that order, not the first"),
+            () -> assertEquals("EXEC-10", orderState(uri, "ORDER-2", 17)),
+            () -> assertEquals("EXEC-7", orderState(uri, "ORDER-3", 17)));
+    }
+
+    /**
+     * @param uri     the harness AMPS URI.
+     * @param orderId the {@code OrderID(37)}.
+     * @param tag     the tag to read.
+     * @return that field of the order's one {@code fix.order.state} record.
+     * @throws Exception if the query fails.
+     */
+    private static String orderState(final String uri, final String orderId, final int tag) throws Exception
+    {
+        final List<String> records =
+            SowReader.query(uri, BridgeConfig.TOPIC_ORDER_STATE, "/37 = '" + orderId + "'");
+        assertEquals(1, records.size(),
+            () -> "expected exactly one fix.order.state record for " + orderId + " but got " +
+                records.stream().map(SowReader::printable).toList());
+        return field(records.get(0), tag);
     }
 
     /**

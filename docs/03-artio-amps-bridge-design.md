@@ -409,7 +409,7 @@ Other timings, from the integration suite and the demo:
 | --- | --- |
 | `AmpsFixPublisher.start()` (connect + logon + agent thread) | ~30 ms against a local container |
 | `close()` on an idle bridge (drain + `publishFlush` + disconnect) | 3–8 ms |
-| logon, five orders, and all ten publishes landed in AMPS | ~1 s wall clock, dominated by the QuickFIX/J logon round trip |
+| logon, the fifteen-message drop copy stream, and all forty publishes landed in AMPS | ~1 s wall clock, dominated by the QuickFIX/J logon round trip |
 | `:artio-amps-bridge:test`, 66 tests as measured (85 after the review pass) | ~4 s |
 | `:artio-amps-bridge:integrationTest` (4 tests, 2 containers) | ~35 s, of which ~7 s is starting AMPS twice |
 
@@ -432,10 +432,12 @@ integration-test failure during development (`expected 5 but was 3`). Use `publi
 `unroutableFor(topic)`, which sum.
 
 **10.4 A cancel/replace produces a new record, not an updated one.** `fix.orders` is keyed on `/11`,
-and `35=G` carries a *new* `ClOrdID` with the previous one in tag 41. The five-message demo scenario
-therefore leaves **five** records for what a human would call three orders. That is the audit shape,
-and it is the one that survives out-of-order delivery; "the state of order X" lives on
-`fix.order.state`, keyed on `/37`.
+and `35=G` carries a *new* `ClOrdID` with the previous one in tag 41. The demo scenario's five order
+events therefore leave **five** records for what a human would call three orders. That is the audit
+shape, and it is the one that survives out-of-order delivery; "the state of order X" lives on
+`fix.order.state`, keyed on `/37`, where the scenario's ten execution reports collapse into **three**
+records because an order keeps one `OrderID` for its whole life. Both halves are visible in the same
+run: fifteen messages, forty publishes, 5 + 10 + 3 records (`docs/07` section 3).
 
 **10.5 Artio delivers admin messages to the sink, and the bridge drops them by default.** The
 counterparty's `Logon` really does arrive (`docs/01` section 6) and is counted in `adminSkipped`, not

@@ -181,17 +181,18 @@ Claiming an ordering in a document is cheap. Three tests make it a property:
 * `BootJarSubprocessIT` reads it out of the log of a separate JVM killed with SIGTERM:
   `artio runtime closed` must appear before `amps publisher drained and flushed`.
 
-Observed, on `kill -TERM` of the fat jar after the five-message scenario:
+Observed, on `kill -TERM` of the fat jar after the fifteen-message drop copy scenario:
 
 ```
-02:00:34.581 INFO  ArtioRuntimeLifecycle      artio runtime closed
-02:00:34.591 INFO  BridgePublisherLifecycle   amps publisher drained and flushed:
-    accepted=7 published=10 pending=0 dropped=0 unroutable=0 errors=0 lost=0 bytes=1504
-    ring=0/4194304 DISCONNECTED [fix.raw={published=5}, fix.orders={published=3}, …]
+18:36:30.472 INFO  ArtioRuntimeLifecycle      artio runtime closed
+18:36:30.480 INFO  BridgePublisherLifecycle   amps publisher drained and flushed:
+    accepted=17 published=40 pending=0 dropped=0 unroutable=0 errors=0 lost=0 bytes=7409
+    ring=0/4194304 DISCONNECTED [fix.raw={published=15}, fix.orders={published=3}, …,
+    fix.execs={published=10}, fix.order.state={published=10}]
 ```
 
-`pending=0`, `dropped=0`, ten publishes for seven accepted messages: everything the session sent
-reached AMPS, 10 ms after the signal.
+`pending=0`, `dropped=0`, forty publishes for seventeen accepted messages: everything the session
+sent reached AMPS, 8 ms after the signal.
 
 ---
 

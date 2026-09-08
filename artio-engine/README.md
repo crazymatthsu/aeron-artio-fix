@@ -162,7 +162,7 @@ The integration suite is unconditional — nothing skips, nothing needs a contai
 
 | Suite | What it proves |
 | --- | --- |
-| `ArtioAcceptorFromQuickfixjIT` | Artio acceptor ← QuickFIX/J initiator, FIX 4.2 and 4.4: logon, five orders with their `ClOrdID`s, the `Logon` arriving as an admin message, the lifecycle events, the full order scenario |
+| `ArtioAcceptorFromQuickfixjIT` | Artio acceptor ← QuickFIX/J initiator, FIX 4.2 and 4.4: logon, five orders with their `ClOrdID`s, the `Logon` arriving as an admin message, the lifecycle events, and the full fifteen-message drop copy scenario — including that Artio accepts another engine's `ExecutionReport`s and hands tags 17, 37, 39 and 6 to the sink unchanged |
 | `ArtioInitiatorToQuickfixjIT` | Artio initiator → QuickFIX/J acceptor, both versions: logon with a measured latency, an order built with a generated encoder that QuickFIX/J validates and answers, ordering across three sends, and a send after close failing the future |
 | `ArtioToArtioIT` | two runtimes, two Aeron directories: an order one way and an execution report back; separate directories, both removed on close |
 | `ArtioRuntimeShutdownIT` | the counterparty gets a `Logout` not a reset (both directions), no Artio or Aeron thread survives `close()`, directories are removed, `close()` is idempotent, `close()` from the poll thread throws, a failed start leaves nothing behind, and four concurrent producers racing `close()` all get their futures completed |

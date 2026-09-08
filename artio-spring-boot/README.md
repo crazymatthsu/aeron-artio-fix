@@ -104,29 +104,46 @@ The context is **not restartable**. Both runtimes refuse a second `start()`, so 
 # 2. the bridge: Artio acceptor on 9880 + the AMPS publisher
 ./gradlew :artio-spring-boot:bootRun
 
-# 3. "the other FIX engine": 3 orders, 1 replace, 1 cancel
+# 3. "the other FIX engine": a drop copy stream - 3 orders, 1 replace, 1 cancel and their 10 reports
 ./gradlew :quickfixj-counterparty:run \
     --args="initiator --host localhost --port 9880 --version FIX.4.2 --sender QFJ --target ARTIO --scenario orders"
 
 # 4. did it arrive?
-./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.orders"        # 5
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.execs"         # 10
+./gradlew :artio-amps-bridge:sowDump --args="--topic fix.order.state"   # 3
 
 # 5. Ctrl-C the bootRun, then
 ./amps-server/scripts/amps.sh down
 ```
 
-Step 4 prints one SOW record per `ClOrdID` — five, not three, because a cancel/replace carries a new
-tag 11 with the previous one in tag 41:
+Fifteen application messages become forty publishes: fifteen on `fix.raw`, five on `fix.orders`, ten
+on `fix.execs` and ten on `fix.order.state`. Real counters from a run on 2026-09-07:
+
+```
+StatsLogger  stats: accepted=17 published=40 pending=0 dropped=0 unroutable=0 errors=0 lost=0
+             bytes=7409 ring=0/4194304 connected [fix.raw={published=15}, fix.orders={published=3},
+             fix.orders={published=1}, fix.orders={published=1}, fix.execs={published=10},
+             fix.order.state={published=10}]
+```
+
+`accepted=17` is the fifteen plus the counterparty's `Logon` and `Logout`, which are counted and
+then skipped. Step 4 prints one SOW record per `ClOrdID` — five, not three, because a cancel/replace
+carries a new tag 11 with the previous one in tag 41:
 
 ```
 SOW fix.orders on tcp://localhost:9007/amps/fix
-  [1] 8=FIX.4.2|...|35=D|...|11=ORD-1|...|55=MSFT|...
-  [2] 8=FIX.4.2|...|35=D|...|11=ORD-2|...
-  [3] 8=FIX.4.2|...|35=D|...|11=ORD-3|...
-  [4] 8=FIX.4.2|...|35=G|...|11=ORD-4|...|41=ORD-1|...
-  [5] 8=FIX.4.2|...|35=F|...|11=ORD-5|...|41=ORD-2|...
+  [1] 8=FIX.4.2|…|35=D|…|11=ORD-1|…|55=MSFT|…
+  [2] 8=FIX.4.2|…|35=D|…|11=ORD-2|…
+  [3] 8=FIX.4.2|…|35=D|…|11=ORD-3|…
+  [4] 8=FIX.4.2|…|35=G|…|11=ORD-4|…|41=ORD-1|…
+  [5] 8=FIX.4.2|…|35=F|…|11=ORD-5|…|41=ORD-2|…
 5 record(s) in fix.orders
 ```
+
+— and one per `ExecID` on `fix.execs` (ten), and one per `OrderID` on `fix.order.state`: **three**,
+because that topic is keyed on `/37` and each record is overwritten in place as its order
+progresses. After the run `ORDER-1` reads Filled, `ORDER-2` Canceled and `ORDER-3` Filled.
 
 The same flow without Spring is `./gradlew :artio-amps-bridge:run`.
 

@@ -83,7 +83,7 @@ configurations["integrationTestRuntimeOnly"]
 dependencies {
     // The throwaway AMPS in podman.
     "integrationTestImplementation"(project(":amps-test-harness"))
-    // "The other FIX engine" that sends the five-message order scenario.
+    // "The other FIX engine" that sends the fifteen-message drop copy scenario.
     "integrationTestImplementation"(project(":quickfixj-counterparty"))
 }
 

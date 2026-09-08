@@ -1,5 +1,7 @@
 package com.demo.artio.qfj;
 
+import java.util.List;
+
 /**
  * The command line of {@link QfjMain}, parsed into a value so it can be unit tested without
  * starting a FIX engine.
@@ -10,7 +12,7 @@ package com.demo.artio.qfj;
  * @param version              {@code --version}; {@code FIX.4.2} or {@code FIX.4.4}.
  * @param senderCompId         {@code --sender}.
  * @param targetCompId         {@code --target}.
- * @param runScenario          {@code --scenario orders} rather than {@code none}.
+ * @param scenario             {@code --scenario}; what the initiator sends.
  * @param heartbeatIntervalSec {@code --heartbeat}.
  * @param screenLog            {@code --screen-log}, a flag: also print QuickFIX/J's own log.
  */
@@ -21,7 +23,7 @@ public record CliArgs(
     QfjVersion version,
     String senderCompId,
     String targetCompId,
-    boolean runScenario,
+    Scenario scenario,
     int heartbeatIntervalSec,
     boolean screenLog)
 {
@@ -34,7 +36,9 @@ public record CliArgs(
           --version <version>  FIX.4.2 or FIX.4.4. Default FIX.4.2
           --sender <compId>    this engine's SenderCompID. Default QFJ
           --target <compId>    the counterparty's TargetCompID. Default ARTIO
-          --scenario <name>    orders (3 new orders, 1 replace, 1 cancel) or none. Default none
+          --scenario <name>    orders or drop-copy (the drop copy stream: 3 new orders, 1 replace,
+                               1 cancel and the 10 execution reports they produce), orders-only
+                               (the 5 order events alone) or none. Default none
           --heartbeat <secs>   HeartBtInt. Default 10
           --screen-log         also print QuickFIX/J's own message log
           --help               print this and exit
@@ -45,11 +49,43 @@ public record CliArgs(
           acceptor  --port 9881 --version FIX.4.4 --sender QFJ --target ARTIO
         """;
 
-    /** The scenario name that runs {@link OrderScenario#DEFAULT}. */
+    /** The scenario name that runs the whole drop copy stream of {@link OrderScenario#DEFAULT}. */
     public static final String SCENARIO_ORDERS = "orders";
+
+    /** A synonym of {@link #SCENARIO_ORDERS} that says what the stream is. */
+    public static final String SCENARIO_DROP_COPY = "drop-copy";
+
+    /** The scenario name that sends {@link OrderScenario#ORDERS_ONLY}: the order events alone. */
+    public static final String SCENARIO_ORDERS_ONLY = "orders-only";
 
     /** The scenario name that sends nothing. */
     public static final String SCENARIO_NONE = "none";
+
+    /** What the initiator sends once it has logged on. */
+    public enum Scenario
+    {
+        /** Nothing: log on and wait for Ctrl-C. */
+        NONE,
+
+        /** The whole drop copy stream: the five order events and the ten execution reports. */
+        DROP_COPY,
+
+        /** The five order events alone, as the scenario was before the reports were scripted in. */
+        ORDERS_ONLY;
+
+        /**
+         * @return the steps this choice sends, in order; empty for {@link #NONE}.
+         */
+        public List<OrderScenario.Step> steps()
+        {
+            return switch (this)
+            {
+                case NONE -> List.of();
+                case DROP_COPY -> OrderScenario.DEFAULT.steps();
+                case ORDERS_ONLY -> OrderScenario.ORDERS_ONLY;
+            };
+        }
+    }
 
     /**
      * Parses a command line.
@@ -81,7 +117,7 @@ public record CliArgs(
         QfjVersion version = QfjVersion.FIX42;
         String sender = "QFJ";
         String target = "ARTIO";
-        boolean runScenario = false;
+        Scenario scenario = Scenario.NONE;
         int heartbeat = 10;
         boolean screenLog = false;
 
@@ -99,14 +135,16 @@ public record CliArgs(
                 case "--heartbeat" -> heartbeat = intValue(args, ++i, option);
                 case "--scenario" ->
                 {
-                    final String scenario = value(args, ++i, option).toLowerCase();
-                    runScenario = switch (scenario)
+                    final String name = value(args, ++i, option).toLowerCase();
+                    scenario = switch (name)
                     {
-                        case SCENARIO_ORDERS -> true;
-                        case SCENARIO_NONE -> false;
+                        case SCENARIO_ORDERS, SCENARIO_DROP_COPY -> Scenario.DROP_COPY;
+                        case SCENARIO_ORDERS_ONLY -> Scenario.ORDERS_ONLY;
+                        case SCENARIO_NONE -> Scenario.NONE;
                         default -> throw new IllegalArgumentException(
-                            "Unknown scenario '" + scenario + "'; expected '" + SCENARIO_ORDERS +
-                                "' or '" + SCENARIO_NONE + "'");
+                            "Unknown scenario '" + name + "'; expected '" + SCENARIO_ORDERS + "', '" +
+                                SCENARIO_DROP_COPY + "', '" + SCENARIO_ORDERS_ONLY + "' or '" +
+                                SCENARIO_NONE + "'");
                     };
                 }
                 default -> throw new IllegalArgumentException("Unknown option '" + option + "'");
@@ -118,7 +156,13 @@ public record CliArgs(
             // Absent, as opposed to present and out of range: that is QfjConfig's complaint.
             throw new IllegalArgumentException("--port is required");
         }
-        return new CliArgs(role, host, port, version, sender, target, runScenario, heartbeat, screenLog);
+        return new CliArgs(role, host, port, version, sender, target, scenario, heartbeat, screenLog);
+    }
+
+    /** @return true if the initiator has something to send, that is if {@code --scenario} is not none. */
+    public boolean runScenario()
+    {
+        return scenario != Scenario.NONE;
     }
 
     /**
